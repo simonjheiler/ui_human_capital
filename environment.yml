@@ -1,0 +1,18 @@
+name: ui_human_capital
+
+channels:
+  - conda-forge
+
+dependencies:
+  - python
+  - numpy
+  - pip
+  - pytest
+  - conda-build
+  - matplotlib
+  - numba
+  - tqdm
+
+  - pip:
+    - pre-commit
+    - numpy-financial

@@ -1,0 +1,174 @@
+#! python
+import json
+import os
+
+
+def build(ctx):
+
+    analysis_plan = json.load(
+        open(
+            os.path.join(
+                str(ctx.env.PROJECT_PATHS["IN_MODEL_SPECS"]),
+                "analysis_plan.json",
+            )
+        )
+    )
+
+    # MODEL RESULTS
+    for method in ["linear", "cubic"]:
+        for setup in analysis_plan[method]["results"]:
+            ctx(
+                features="run_py_script",
+                source="solve_model.py",
+                deps=ctx.path_to(
+                    ctx, "IN_MODEL_SPECS", "analytics_calibration_" + setup + ".json"
+                ),
+                target=ctx.path_to(
+                    ctx,
+                    "OUT_RESULTS",
+                    "analytics",
+                    "analytics_" + setup + "_results_" + method + ".json",
+                ),
+                name="solve_model",
+                append=[setup, method],
+            )
+
+    # APPROXIMATE ELASTICITIES
+    for method in ["linear", "cubic"]:
+        for setup in analysis_plan[method]["elasticity_approx"]:
+            ctx(
+                features="run_py_script",
+                source="elasticity_1_step.py",
+                deps=ctx.path_to(
+                    ctx, "IN_MODEL_SPECS", "analytics_calibration_" + setup + ".json"
+                ),
+                target=ctx.path_to(
+                    ctx,
+                    "OUT_RESULTS",
+                    "analytics",
+                    "analytics_" + setup + "_elasticity_approx_" + method + ".json",
+                ),
+                name="elasticity_exact",
+                append=[setup, method],
+            )
+            ctx.add_group()
+
+    # EXACT ELASTICITIES
+    for method in ["linear", "cubic"]:
+        for setup in analysis_plan[method]["elasticity_exact"]:
+            ctx(
+                features="run_py_script",
+                source="elasticity_exact.py",
+                deps=ctx.path_to(
+                    ctx, "IN_MODEL_SPECS", "analytics_calibration_" + setup + ".json"
+                ),
+                target=ctx.path_to(
+                    ctx,
+                    "OUT_RESULTS",
+                    "analytics",
+                    "analytics_" + setup + "_elasticity_exact_" + method + ".json",
+                ),
+                name="elasticity_exact",
+                append=[setup, method],
+            )
+            ctx.add_group()
+
+    # FIRST BEST SOLUTION
+    for method in ["linear", "cubic"]:
+        for setup in analysis_plan[method]["first_best"]:
+            ctx(
+                features="run_py_script",
+                source="first_best.py",
+                deps=ctx.path_to(
+                    ctx, "IN_MODEL_SPECS", "analytics_calibration_" + setup + ".json"
+                ),
+                target=ctx.path_to(
+                    ctx,
+                    "OUT_RESULTS",
+                    "analytics",
+                    "analytics_" + setup + "_first_best_" + method + ".json",
+                ),
+                name="first_best",
+                append=[setup, method],
+            )
+
+    for method in ["linear", "cubic"]:
+        for specs in analysis_plan[method]["first_best_3_agents"]:
+            ctx(
+                features="run_py_script",
+                source="first_best.py",
+                deps=[
+                    ctx.path_to(
+                        ctx,
+                        "OUT_RESULTS",
+                        "analytics",
+                        "analytics_" + setup_name + "_" + method + ".json",
+                    )
+                    for setup_name in specs["setups"]
+                ],
+                target=ctx.path_to(
+                    ctx,
+                    "OUT_RESULTS",
+                    "analytics",
+                    "analytics_" + specs["name"] + "_first_best_" + method + ".json",
+                ),
+            )
+
+    # OPTIMIZATION
+    for method in ["linear", "cubic"]:
+        for setup in analysis_plan[method]["optimization"]:
+            ctx(
+                features="run_py_script",
+                source="optimization.py",
+                deps=ctx.path_to(
+                    ctx, "IN_MODEL_SPECS", "analytics_calibration_" + setup + ".json"
+                ),
+                target=ctx.path_to(
+                    ctx,
+                    "OUT_RESULTS",
+                    "analytics",
+                    "analytics_" + setup + "_optimization_" + method + ".json",
+                ),
+                name="optimization",
+                append=[setup, method],
+            )
+
+    for method in ["linear", "cubic"]:
+        for welfare_spec in analysis_plan[method]["welfare"]:
+
+            equilibrium_condition = welfare_spec["equilibrium_condition"]
+            setup_baseline = welfare_spec["baseline"]
+            results_files = welfare_spec["results"]
+
+            ctx(
+                features="run_py_script",
+                source="welfare.py",
+                deps=[
+                    ctx.path_to(
+                        ctx,
+                        "IN_MODEL_SPECS",
+                        "analytics_calibration_" + setup_baseline + ".json",
+                    )
+                ]
+                + [
+                    ctx.path_to(
+                        ctx,
+                        "OUT_RESULTS",
+                        "analytics",
+                        "analytics_" + file + "_" + method + ".json",
+                    )
+                    for file in results_files.values()
+                ],
+                target=ctx.path_to(
+                    ctx,
+                    "OUT_RESULTS",
+                    "analytics",
+                    "analytics_welfare_comparison_"
+                    + equilibrium_condition
+                    + "_"
+                    + method
+                    + ".csv",
+                ),
+                name="welfare_analysis",
+                append=[method, equilibrium_condition],
+            )

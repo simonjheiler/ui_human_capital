@@ -1,0 +1,45 @@
+{
+  "calibration": [
+    "base_combined_recalibrated_no_inctax",
+    "opt_rate_age_combined_recalibrated_no_inctax",
+    "opt_rate_both_combined_recalibrated_no_inctax",
+    "opt_rate_floor_cap_combined_recalibrated_no_inctax"
+  ],
+  "linear": {
+    "results": [
+      "base_combined_recalibrated_no_inctax",
+      "opt_rate_age_combined_recalibrated_no_inctax",
+      "opt_rate_both_combined_recalibrated_no_inctax",
+      "opt_rate_floor_cap_combined_recalibrated_no_inctax"
+    ],
+    "elasticity_approx": [],
+    "elasticity_exact": [],
+    "first_best": [
+      "base_combined_recalibrated_no_inctax"
+    ],
+    "first_best_3_agents": [],
+    "optimization": [],
+    "welfare": [
+      {
+        "equilibrium_condition": "combined",
+        "baseline": "base_combined_recalibrated_no_inctax",
+        "results": {
+          "First best": "base_combined_recalibrated_no_inctax_first_best",
+          "Age and type dependent": "opt_rate_both_combined_recalibrated_no_inctax_results",
+          "Age dependent": "opt_rate_age_combined_recalibrated_no_inctax_results",
+          "Constant rate, floor and cap": "opt_rate_floor_cap_combined_recalibrated_no_inctax_results",
+          "Baseline": "base_combined_recalibrated_no_inctax_results"
+        }
+      }
+    ]
+  },
+  "cubic": {
+    "results": [],
+    "elasticity_approx": [],
+    "elasticity_exact": [],
+    "first_best": [],
+    "first_best_3_agents": [],
+    "optimization": [],
+    "welfare": []
+  }
+}

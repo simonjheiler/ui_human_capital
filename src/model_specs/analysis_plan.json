@@ -21,7 +21,7 @@
     "optimization": [],
     "welfare": [
       {
-        "equilibrium_condition": "combined",
+        "equilibrium_condition": "combined_recalibrated_no_inctax",
         "baseline": "base_combined_recalibrated_no_inctax",
         "results": {
           "First best": "base_combined_recalibrated_no_inctax_first_best",

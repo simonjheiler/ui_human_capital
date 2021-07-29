@@ -6,9 +6,9 @@ import warnings
 import numba as nb
 import numpy as np
 import numpy_financial as npf
-from bld.project_paths import project_paths_join as ppj
 from scipy import interpolate
 
+from bld.project_paths import project_paths_join as ppj
 from src.utilities.interpolation_utils import interpolate_1d
 from src.utilities.interpolation_utils import interpolate_2d_ordered_to_unordered
 from src.utilities.interpolation_utils import interpolate_2d_unordered_to_unordered_iter
@@ -78,20 +78,27 @@ def _apply_borrowing_limit_employed(
     consumption_on_grid,
     assets_next,
     wage_hc_factor_grid,
-    income_tax_rate_vector,
+    tax_ss,
+    tax_ui,
+    tax_income,
+    transfers_lumpsum,
     period_idx,
 ):
     # adjust consumption for binding borrowing constraint
     consumption_corrected = (
-        assets_next >= borrowing_limit_e_a
-    ) * consumption_on_grid + (assets_next < borrowing_limit_e_a) * (
-        assets_grid_e_a * (1 + interest_rate)
-        + (1 - income_tax_rate_vector[period_idx]) * wage_level * wage_hc_factor_grid
-        - borrowing_limit_e_a
+        assets_next >= borrowing_limit_h_a
+    ) * consumption_on_grid + (assets_next < borrowing_limit_h_a) * (
+        (1 - tax_ss - tax_ui[period_idx] - tax_income)
+        * wage_level
+        * wage_hc_factor_grid
+        + assets_grid_h_a
+        + (1 - tax_income) * interest_rate_raw * assets_grid_h_a
+        + transfers_lumpsum
+        - borrowing_limit_h_a
     )
 
     # adjust assets for binding borrowing constraint
-    assets_next_corrected = np.maximum(assets_next, borrowing_limit_e_a)
+    assets_next_corrected = np.maximum(assets_next, borrowing_limit_h_a)
 
     return consumption_corrected, assets_next_corrected
 
@@ -100,6 +107,8 @@ def _apply_borrowing_limit_unemployed(
     consumption_on_grid,
     assets_next,
     wage_hc_factor_grid,
+    tax_income,
+    transfers_lumpsum,
     ui_replacement_rate_vector,
     ui_floor,
     ui_cap,
@@ -108,21 +117,23 @@ def _apply_borrowing_limit_unemployed(
 
     # adjust consumption for binding borrowing constraint
     consumption_corrected = (
-        assets_next >= borrowing_limit_e_a
-    ) * consumption_on_grid + (assets_next < borrowing_limit_e_a) * (
-        assets_grid_e_a * (1 + interest_rate)
-        + _ui_benefits(
+        assets_next >= borrowing_limit_h_a
+    ) * consumption_on_grid + (assets_next < borrowing_limit_h_a) * (
+        _ui_benefits(
             wage_level * wage_hc_factor_grid,
             ui_replacement_rate_vector,
             ui_floor,
             ui_cap,
             period_idx,
         )
-        - borrowing_limit_e_a
+        + assets_grid_h_a
+        + (1 - tax_income) * interest_rate_raw * assets_grid_h_a
+        + transfers_lumpsum
+        - borrowing_limit_h_a
     )
 
     # adjust assets for binding borrowing constraint
-    assets_next_corrected = np.maximum(assets_next, borrowing_limit_e_a)
+    assets_next_corrected = np.maximum(assets_next, borrowing_limit_h_a)
 
     return consumption_corrected, assets_next_corrected
 
@@ -132,46 +143,51 @@ def _foc_employed(
     policy_consumption_employed_next,
     policy_consumption_unemployed_next,
     separation_rate_vector,
+    tax_income,
     period_idx,
 ):
     # interpolate next period consumption and search effort policies
     # to account for hc increase
     policy_consumption_employed_plus_next = interpolate_2d_ordered_to_unordered(
-        hc_grid_reduced_e_a,
-        assets_grid_e_a,
+        hc_grid_reduced_h_a,
+        assets_grid_h_a,
         policy_consumption_employed_next,
-        np.minimum(hc_grid_reduced_e_a + 1, hc_max),
-        assets_grid_e_a,
+        np.minimum(hc_grid_reduced_h_a + 1, hc_max),
+        assets_grid_h_a,
         method=interpolation_method,
     )
     policy_consumption_unemployed_plus_next = interpolate_2d_ordered_to_unordered(
-        hc_grid_reduced_e_a,
-        assets_grid_e_a,
+        hc_grid_reduced_h_a,
+        assets_grid_h_a,
         policy_consumption_unemployed_next,
-        np.minimum(hc_grid_reduced_e_a + 1, hc_max),
-        assets_grid_e_a,
+        np.minimum(hc_grid_reduced_h_a + 1, hc_max),
+        assets_grid_h_a,
         method=interpolation_method,
     )
     policy_effort_searching_plus_next = interpolate_2d_ordered_to_unordered(
-        hc_grid_reduced_e_a,
-        assets_grid_e_a,
+        hc_grid_reduced_h_a,
+        assets_grid_h_a,
         policy_effort_searching_next,
-        np.minimum(hc_grid_reduced_e_a + 1, hc_max),
-        assets_grid_e_a,
+        np.minimum(hc_grid_reduced_h_a + 1, hc_max),
+        assets_grid_h_a,
         method=interpolation_method,
     )
 
     # consumption via FOC [hc x assets]
     consumption_employed_off_grid = _consumption_utility_dx_inverted(
-        separation_rate_vector[period_idx]
+        discount_factor
+        * (1 + (1 - tax_income) * interest_rate_raw)
         * (
-            job_finding_probability(policy_effort_searching_plus_next)
+            separation_rate_vector[period_idx]
+            * (
+                job_finding_probability(policy_effort_searching_plus_next)
+                * _consumption_utility_dx(policy_consumption_employed_plus_next)
+                + (1 - job_finding_probability(policy_effort_searching_plus_next))
+                * _consumption_utility_dx(policy_consumption_unemployed_plus_next)
+            )
+            + (1 - separation_rate_vector[period_idx])
             * _consumption_utility_dx(policy_consumption_employed_plus_next)
-            + (1 - job_finding_probability(policy_effort_searching_plus_next))
-            * _consumption_utility_dx(policy_consumption_unemployed_plus_next)
         )
-        + (1 - separation_rate_vector[period_idx])
-        * _consumption_utility_dx(policy_consumption_employed_plus_next)
     )
 
     return consumption_employed_off_grid
@@ -186,39 +202,44 @@ def _foc_unemployed(
     hc_loss_probability,
     wage_loss_factor_vector,
     wage_loss_reference_vector,
+    tax_income,
     period_idx,
 ):
 
     # interpolate next period consumption policies to account fo hc loss
     policy_consumption_employed_loss_next = interpolate_2d_ordered_to_unordered(
-        hc_grid_reduced_e_a,
-        assets_grid_e_a,
+        hc_grid_reduced_h_a,
+        assets_grid_h_a,
         policy_consumption_employed_next,
         _hc_after_loss_1_agent(
-            hc_grid_reduced_e_a,
+            hc_grid_reduced_h_a,
             wage_loss_factor_vector,
             wage_loss_reference_vector,
             period_idx + 1,
         ),
-        assets_grid_e_a,
+        assets_grid_h_a,
         method=interpolation_method,
     )
 
     # back out optimal consumption via FOC
     consumption_unemployed_off_grid = _consumption_utility_dx_inverted(
-        (1 - hc_loss_probability)
+        discount_factor
+        * (1 + (1 - tax_income) * interest_rate_raw)
         * (
-            job_finding_probability(policy_effort_searching_next)
-            * _consumption_utility_dx(policy_consumption_employed_next)
-            + (1 - job_finding_probability(policy_effort_searching_next))
-            * _consumption_utility_dx(policy_consumption_unemployed_next)
-        )
-        + hc_loss_probability
-        * (
-            job_finding_probability(policy_effort_searching_loss_next)
-            * _consumption_utility_dx(policy_consumption_employed_loss_next)
-            + (1 - job_finding_probability(policy_effort_searching_loss_next))
-            * _consumption_utility_dx(policy_consumption_unemployed_loss_next)
+            (1 - hc_loss_probability)
+            * (
+                job_finding_probability(policy_effort_searching_next)
+                * _consumption_utility_dx(policy_consumption_employed_next)
+                + (1 - job_finding_probability(policy_effort_searching_next))
+                * _consumption_utility_dx(policy_consumption_unemployed_next)
+            )
+            + hc_loss_probability
+            * (
+                job_finding_probability(policy_effort_searching_loss_next)
+                * _consumption_utility_dx(policy_consumption_employed_loss_next)
+                + (1 - job_finding_probability(policy_effort_searching_loss_next))
+                * _consumption_utility_dx(policy_consumption_unemployed_loss_next)
+            )
         )
     )
 
@@ -231,113 +252,109 @@ def _foc_unemployed_loss(
     policy_consumption_unemployed_loss_next,
     wage_loss_factor_vector,
     wage_loss_reference_vector,
+    tax_income,
     period_idx,
 ):
 
     # interpolate next period consumption policies to account fo hc loss
     policy_consumption_employed_loss_next = interpolate_2d_ordered_to_unordered(
-        hc_grid_reduced_e_a,
-        assets_grid_e_a,
+        hc_grid_reduced_h_a,
+        assets_grid_h_a,
         policy_consumption_employed_next,
         _hc_after_loss_1_agent(
-            hc_grid_reduced_e_a,
+            hc_grid_reduced_h_a,
             wage_loss_factor_vector,
             wage_loss_reference_vector,
             period_idx + 1,
         ),
-        assets_grid_e_a,
+        assets_grid_h_a,
         method=interpolation_method,
     )
 
     # back out optimal consumption via FOC
     consumption_unemployed_loss_off_grid = _consumption_utility_dx_inverted(
-        job_finding_probability(policy_effort_searching_loss_next)
-        * _consumption_utility_dx(policy_consumption_employed_loss_next)
-        + (1 - job_finding_probability(policy_effort_searching_loss_next))
-        * _consumption_utility_dx(policy_consumption_unemployed_loss_next)
+        discount_factor
+        * (1 + (1 - tax_income) * interest_rate_raw)
+        * (
+            job_finding_probability(policy_effort_searching_loss_next)
+            * _consumption_utility_dx(policy_consumption_employed_loss_next)
+            + (1 - job_finding_probability(policy_effort_searching_loss_next))
+            * _consumption_utility_dx(policy_consumption_unemployed_loss_next)
+        )
     )
 
     return consumption_unemployed_loss_off_grid
 
 
-def _get_cost_employed(
-    cost_employed_next,
-    cost_unemployed_next,
-    policy_consumption_employed_now,
+def _get_cost_ui_employed(
+    cost_ui_employed_next,
+    cost_ui_unemployed_next,
     policy_effort_searching_next,
     policy_assets_employed_now,
     separation_rate_vector,
-    wage_hc_factor_vector,
-    consumption_tax_rate,
-    income_tax_rate_vector,
     period_idx,
 ):
 
     # interpolate next period cost functions and search effort policy
     # to account for increase in hc and choice of assets next period
-    cost_employed_next_interpolated = interpolate_2d_ordered_to_unordered(
-        hc_grid_reduced_e_a1,
-        assets_grid_e_a1,
-        np.append(cost_employed_next, cost_employed_next[:, -1, np.newaxis], axis=1),
-        np.minimum(hc_grid_reduced_e_a + 1, hc_max),
+    cost_ui_employed_next_interpolated = interpolate_2d_ordered_to_unordered(
+        hc_grid_reduced_h_a1,
+        assets_grid_h_a1,
+        np.append(
+            cost_ui_employed_next, cost_ui_employed_next[:, -1, np.newaxis], axis=1
+        ),
+        np.minimum(hc_grid_reduced_h_a + 1, hc_max),
         policy_assets_employed_now,
         method=interpolation_method,
     )
-    cost_unemployed_next_interpolated = interpolate_2d_ordered_to_unordered(
-        hc_grid_reduced_e_a1,
-        assets_grid_e_a1,
+    cost_ui_unemployed_next_interpolated = interpolate_2d_ordered_to_unordered(
+        hc_grid_reduced_h_a1,
+        assets_grid_h_a1,
         np.append(
-            cost_unemployed_next, cost_unemployed_next[:, -1, np.newaxis], axis=1
+            cost_ui_unemployed_next, cost_ui_unemployed_next[:, -1, np.newaxis], axis=1
         ),
-        np.minimum(hc_grid_reduced_e_a + 1, hc_max),
+        np.minimum(hc_grid_reduced_h_a + 1, hc_max),
         policy_assets_employed_now,
         method=interpolation_method,
     )
     effort_searching_plus_next = interpolate_2d_ordered_to_unordered(
-        hc_grid_reduced_e_a1,
-        assets_grid_e_a1,
+        hc_grid_reduced_h_a1,
+        assets_grid_h_a1,
         np.append(
             policy_effort_searching_next,
             policy_effort_searching_next[:, -1, np.newaxis],
             axis=1,
         ),
-        np.minimum(hc_grid_reduced_e_a + 1, hc_max),
+        np.minimum(hc_grid_reduced_h_a + 1, hc_max),
         policy_assets_employed_now,
         method=interpolation_method,
     )
 
     # calculate current period cost
-    cost_employed = (
-        -consumption_tax_rate * policy_consumption_employed_now
-        - np.repeat(
-            (
-                income_tax_rate_vector[period_idx]
-                * wage_level
-                * wage_hc_factor_vector[hc_grid_reduced]
-            ),
-            assets_grid_size,
-        ).reshape(hc_grid_reduced_size, assets_grid_size)
-        + discount_factor
+    cost_ui_employed = (
+        1
+        / (1 + interest_rate_raw)
         * (1 - separation_rate_vector[period_idx])
-        * cost_employed_next_interpolated
-        + discount_factor
+        * cost_ui_employed_next_interpolated
+        + 1
+        / (1 + interest_rate_raw)
         * separation_rate_vector[period_idx]
         * effort_searching_plus_next
-        * cost_employed_next_interpolated
-        + discount_factor
+        * cost_ui_employed_next_interpolated
+        + 1
+        / (1 + interest_rate_raw)
         * separation_rate_vector[period_idx]
         * (1 - effort_searching_plus_next)
-        * cost_unemployed_next_interpolated
+        * cost_ui_unemployed_next_interpolated
     )
 
-    return cost_employed
+    return cost_ui_employed
 
 
-def _get_cost_unemployed(
-    cost_employed_next,
-    cost_unemployed_next,
-    cost_unemployed_loss_next,
-    policy_consumption_unemployed_now,
+def _get_cost_ui_unemployed(
+    cost_ui_employed_next,
+    cost_ui_unemployed_next,
+    cost_ui_unemployed_loss_next,
     policy_effort_searching_next,
     policy_effort_searching_loss_next,
     policy_assets_unemployed_now,
@@ -345,7 +362,6 @@ def _get_cost_unemployed(
     wage_hc_factor_vector,
     wage_loss_factor_vector,
     wage_loss_reference_vector,
-    consumption_tax_rate,
     ui_replacement_rate_vector,
     ui_floor,
     ui_cap,
@@ -354,36 +370,36 @@ def _get_cost_unemployed(
 
     # interpolate next period cost functions and search effort policy
     # to account for hc loss and choice of assets next period
-    cost_employed_next_interpolated = interpolate_2d_ordered_to_unordered(
-        hc_grid_reduced_e_a,
-        assets_grid_e_a,
-        cost_employed_next,
-        hc_grid_reduced_e_a,
+    cost_ui_employed_next_interpolated = interpolate_2d_ordered_to_unordered(
+        hc_grid_reduced_h_a,
+        assets_grid_h_a,
+        cost_ui_employed_next,
+        hc_grid_reduced_h_a,
         policy_assets_unemployed_now,
         method=interpolation_method,
     )
-    cost_unemployed_next_interpolated = interpolate_2d_ordered_to_unordered(
-        hc_grid_reduced_e_a,
-        assets_grid_e_a,
-        cost_unemployed_next,
-        hc_grid_reduced_e_a,
+    cost_ui_unemployed_next_interpolated = interpolate_2d_ordered_to_unordered(
+        hc_grid_reduced_h_a,
+        assets_grid_h_a,
+        cost_ui_unemployed_next,
+        hc_grid_reduced_h_a,
         policy_assets_unemployed_now,
         method=interpolation_method,
     )
-    cost_unemployed_loss_next_interpolated = interpolate_2d_ordered_to_unordered(
-        hc_grid_reduced_e_a,
-        assets_grid_e_a,
-        cost_unemployed_loss_next,
-        hc_grid_reduced_e_a,
+    cost_ui_unemployed_loss_next_interpolated = interpolate_2d_ordered_to_unordered(
+        hc_grid_reduced_h_a,
+        assets_grid_h_a,
+        cost_ui_unemployed_loss_next,
+        hc_grid_reduced_h_a,
         policy_assets_unemployed_now,
         method=interpolation_method,
     )
-    cost_employed_loss_next_interpolated = interpolate_2d_ordered_to_unordered(
-        hc_grid_reduced_e_a,
-        assets_grid_e_a,
-        cost_employed_next,
+    cost_ui_employed_loss_next_interpolated = interpolate_2d_ordered_to_unordered(
+        hc_grid_reduced_h_a,
+        assets_grid_h_a,
+        cost_ui_employed_next,
         _hc_after_loss_1_agent(
-            hc_grid_reduced_e_a,
+            hc_grid_reduced_h_a,
             wage_loss_factor_vector,
             wage_loss_reference_vector,
             period_idx + 1,
@@ -392,26 +408,25 @@ def _get_cost_unemployed(
         method=interpolation_method,
     )
     effort_searching_next = interpolate_2d_ordered_to_unordered(
-        hc_grid_reduced_e_a,
-        assets_grid_e_a,
+        hc_grid_reduced_h_a,
+        assets_grid_h_a,
         policy_effort_searching_next,
-        hc_grid_reduced_e_a,
+        hc_grid_reduced_h_a,
         policy_assets_unemployed_now,
         method=interpolation_method,
     )
     effort_searching_loss_next = interpolate_2d_ordered_to_unordered(
-        hc_grid_reduced_e_a,
-        assets_grid_e_a,
+        hc_grid_reduced_h_a,
+        assets_grid_h_a,
         policy_effort_searching_loss_next,
-        hc_grid_reduced_e_a,
+        hc_grid_reduced_h_a,
         policy_assets_unemployed_now,
         method=interpolation_method,
     )
 
     # calculate current period cost
-    cost_unemployed = (
-        -consumption_tax_rate * policy_consumption_unemployed_now
-        + np.repeat(
+    cost_ui_unemployed = (
+        np.repeat(
             _ui_benefits(
                 wage_level * wage_hc_factor_vector[hc_grid_reduced],
                 ui_replacement_rate_vector,
@@ -421,37 +436,37 @@ def _get_cost_unemployed(
             ),
             assets_grid_size,
         ).reshape(hc_grid_reduced_size, assets_grid_size)
-        + discount_factor
+        + 1
+        / (1 + interest_rate_raw)
         * (1 - hc_loss_probability)
         * (
             job_finding_probability(effort_searching_next)
-            * cost_employed_next_interpolated
+            * cost_ui_employed_next_interpolated
             + (1 - job_finding_probability(effort_searching_next))
-            * cost_unemployed_next_interpolated
+            * cost_ui_unemployed_next_interpolated
         )
-        + discount_factor
+        + 1
+        / (1 + interest_rate_raw)
         * hc_loss_probability
         * (
             job_finding_probability(effort_searching_loss_next)
-            * cost_employed_loss_next_interpolated
+            * cost_ui_employed_loss_next_interpolated
             + (1 - job_finding_probability(effort_searching_loss_next))
-            * cost_unemployed_loss_next_interpolated
+            * cost_ui_unemployed_loss_next_interpolated
         )
     )
 
-    return cost_unemployed
+    return cost_ui_unemployed
 
 
-def _get_cost_unemployed_loss(
-    cost_employed_next,
-    cost_unemployed_loss_next,
-    policy_consumption_unemployed_loss_now,
+def _get_cost_ui_unemployed_loss(
+    cost_ui_employed_next,
+    cost_ui_unemployed_loss_next,
     policy_effort_searching_loss_next,
     policy_assets_unemployed_loss_now,
     wage_hc_factor_vector,
     wage_loss_factor_vector,
     wage_loss_reference_vector,
-    consumption_tax_rate,
     ui_replacement_rate_vector,
     ui_floor,
     ui_cap,
@@ -460,12 +475,12 @@ def _get_cost_unemployed_loss(
 
     # interpolate next period cost functions and search effort policy
     # to account for hc loss and choice of assets next period
-    cost_employed_loss_next_interpolated = interpolate_2d_ordered_to_unordered(
-        hc_grid_reduced_e_a,
-        assets_grid_e_a,
-        cost_employed_next,
+    cost_ui_employed_loss_next_interpolated = interpolate_2d_ordered_to_unordered(
+        hc_grid_reduced_h_a,
+        assets_grid_h_a,
+        cost_ui_employed_next,
         _hc_after_loss_1_agent(
-            hc_grid_reduced_e_a,
+            hc_grid_reduced_h_a,
             wage_loss_factor_vector,
             wage_loss_reference_vector,
             period_idx + 1,
@@ -473,44 +488,954 @@ def _get_cost_unemployed_loss(
         policy_assets_unemployed_loss_now,
         method=interpolation_method,
     )
-    cost_unemployed_loss_next_interpolated = interpolate_2d_ordered_to_unordered(
-        hc_grid_reduced_e_a,
-        assets_grid_e_a,
-        cost_unemployed_loss_next,
-        hc_grid_reduced_e_a,
+    cost_ui_unemployed_loss_next_interpolated = interpolate_2d_ordered_to_unordered(
+        hc_grid_reduced_h_a,
+        assets_grid_h_a,
+        cost_ui_unemployed_loss_next,
+        hc_grid_reduced_h_a,
         policy_assets_unemployed_loss_now,
         method=interpolation_method,
     )
     effort_searching_loss_next = interpolate_2d_ordered_to_unordered(
-        hc_grid_reduced_e_a,
-        assets_grid_e_a,
+        hc_grid_reduced_h_a,
+        assets_grid_h_a,
         policy_effort_searching_loss_next,
-        hc_grid_reduced_e_a,
+        hc_grid_reduced_h_a,
         policy_assets_unemployed_loss_now,
         method=interpolation_method,
     )
 
     # calculate current period cost
-    cost_unemployed_loss = (
-        -consumption_tax_rate * policy_consumption_unemployed_loss_now
-        + np.repeat(
-            _ui_benefits(
-                wage_level * wage_hc_factor_vector[hc_grid_reduced],
-                ui_replacement_rate_vector,
-                ui_floor,
-                ui_cap,
-                period_idx,
-            ),
+    cost_ui_unemployed_loss = np.repeat(
+        _ui_benefits(
+            wage_level * wage_hc_factor_vector[hc_grid_reduced],
+            ui_replacement_rate_vector,
+            ui_floor,
+            ui_cap,
+            period_idx,
+        ),
+        assets_grid_size,
+    ).reshape(hc_grid_reduced_size, assets_grid_size) + 1 / (1 + interest_rate_raw) * (
+        effort_searching_loss_next * cost_ui_employed_loss_next_interpolated
+        + (1 - effort_searching_loss_next) * cost_ui_unemployed_loss_next_interpolated
+    )
+
+    return cost_ui_unemployed_loss
+
+
+def _get_revenue_ss_employed(
+    revenue_ss_employed_next,
+    revenue_ss_unemployed_next,
+    policy_effort_searching_next,
+    policy_assets_employed_now,
+    separation_rate_vector,
+    wage_hc_factor_vector,
+    tax_ss,
+    period_idx,
+):
+
+    # interpolate next period cost functions and search effort policy
+    # to account for increase in hc and choice of assets next period
+    revenue_ss_employed_next_interpolated = interpolate_2d_ordered_to_unordered(
+        hc_grid_reduced_h_a1,
+        assets_grid_h_a1,
+        np.append(
+            revenue_ss_employed_next,
+            revenue_ss_employed_next[:, -1, np.newaxis],
+            axis=1,
+        ),
+        np.minimum(hc_grid_reduced_h_a + 1, hc_max),
+        policy_assets_employed_now,
+        method=interpolation_method,
+    )
+    revenue_ss_unemployed_next_interpolated = interpolate_2d_ordered_to_unordered(
+        hc_grid_reduced_h_a1,
+        assets_grid_h_a1,
+        np.append(
+            revenue_ss_unemployed_next,
+            revenue_ss_unemployed_next[:, -1, np.newaxis],
+            axis=1,
+        ),
+        np.minimum(hc_grid_reduced_h_a + 1, hc_max),
+        policy_assets_employed_now,
+        method=interpolation_method,
+    )
+    effort_searching_plus_next = interpolate_2d_ordered_to_unordered(
+        hc_grid_reduced_h_a1,
+        assets_grid_h_a1,
+        np.append(
+            policy_effort_searching_next,
+            policy_effort_searching_next[:, -1, np.newaxis],
+            axis=1,
+        ),
+        np.minimum(hc_grid_reduced_h_a + 1, hc_max),
+        policy_assets_employed_now,
+        method=interpolation_method,
+    )
+
+    # calculate current period cost
+    revenue_ss_employed = (
+        np.repeat(
+            (tax_ss * wage_level * wage_hc_factor_vector[hc_grid_reduced]),
             assets_grid_size,
         ).reshape(hc_grid_reduced_size, assets_grid_size)
-        + discount_factor
+        + 1
+        / (1 + interest_rate_raw)
+        * (1 - separation_rate_vector[period_idx])
+        * revenue_ss_employed_next_interpolated
+        + 1
+        / (1 + interest_rate_raw)
+        * separation_rate_vector[period_idx]
+        * effort_searching_plus_next
+        * revenue_ss_employed_next_interpolated
+        + 1
+        / (1 + interest_rate_raw)
+        * separation_rate_vector[period_idx]
+        * (1 - effort_searching_plus_next)
+        * revenue_ss_unemployed_next_interpolated
+    )
+
+    return revenue_ss_employed
+
+
+def _get_revenue_ss_unemployed(
+    revenue_ss_employed_next,
+    revenue_ss_unemployed_next,
+    revenue_ss_unemployed_loss_next,
+    policy_effort_searching_next,
+    policy_effort_searching_loss_next,
+    policy_assets_unemployed_now,
+    hc_loss_probability,
+    wage_loss_factor_vector,
+    wage_loss_reference_vector,
+    period_idx,
+):
+
+    # interpolate next period cost functions and search effort policy
+    # to account for hc loss and choice of assets next period
+    revenue_ss_employed_next_interpolated = interpolate_2d_ordered_to_unordered(
+        hc_grid_reduced_h_a,
+        assets_grid_h_a,
+        revenue_ss_employed_next,
+        hc_grid_reduced_h_a,
+        policy_assets_unemployed_now,
+        method=interpolation_method,
+    )
+    revenue_ss_unemployed_next_interpolated = interpolate_2d_ordered_to_unordered(
+        hc_grid_reduced_h_a,
+        assets_grid_h_a,
+        revenue_ss_unemployed_next,
+        hc_grid_reduced_h_a,
+        policy_assets_unemployed_now,
+        method=interpolation_method,
+    )
+    revenue_ss_unemployed_loss_next_interpolated = interpolate_2d_ordered_to_unordered(
+        hc_grid_reduced_h_a,
+        assets_grid_h_a,
+        revenue_ss_unemployed_loss_next,
+        hc_grid_reduced_h_a,
+        policy_assets_unemployed_now,
+        method=interpolation_method,
+    )
+    revenue_ss_employed_loss_next_interpolated = interpolate_2d_ordered_to_unordered(
+        hc_grid_reduced_h_a,
+        assets_grid_h_a,
+        revenue_ss_employed_next,
+        _hc_after_loss_1_agent(
+            hc_grid_reduced_h_a,
+            wage_loss_factor_vector,
+            wage_loss_reference_vector,
+            period_idx + 1,
+        ),
+        policy_assets_unemployed_now,
+        method=interpolation_method,
+    )
+    effort_searching_next = interpolate_2d_ordered_to_unordered(
+        hc_grid_reduced_h_a,
+        assets_grid_h_a,
+        policy_effort_searching_next,
+        hc_grid_reduced_h_a,
+        policy_assets_unemployed_now,
+        method=interpolation_method,
+    )
+    effort_searching_loss_next = interpolate_2d_ordered_to_unordered(
+        hc_grid_reduced_h_a,
+        assets_grid_h_a,
+        policy_effort_searching_loss_next,
+        hc_grid_reduced_h_a,
+        policy_assets_unemployed_now,
+        method=interpolation_method,
+    )
+
+    # calculate current period cost
+    revenue_ss_unemployed = 1 / (1 + interest_rate_raw) * (1 - hc_loss_probability) * (
+        job_finding_probability(effort_searching_next)
+        * revenue_ss_employed_next_interpolated
+        + (1 - job_finding_probability(effort_searching_next))
+        * revenue_ss_unemployed_next_interpolated
+    ) + 1 / (1 + interest_rate_raw) * hc_loss_probability * (
+        job_finding_probability(effort_searching_loss_next)
+        * revenue_ss_employed_loss_next_interpolated
+        + (1 - job_finding_probability(effort_searching_loss_next))
+        * revenue_ss_unemployed_loss_next_interpolated
+    )
+
+    return revenue_ss_unemployed
+
+
+def _get_revenue_ss_unemployed_loss(
+    revenue_ss_employed_next,
+    revenue_ss_unemployed_loss_next,
+    policy_effort_searching_loss_next,
+    policy_assets_unemployed_loss_now,
+    wage_loss_factor_vector,
+    wage_loss_reference_vector,
+    period_idx,
+):
+
+    # interpolate next period cost functions and search effort policy
+    # to account for hc loss and choice of assets next period
+    revenue_ss_employed_loss_next_interpolated = interpolate_2d_ordered_to_unordered(
+        hc_grid_reduced_h_a,
+        assets_grid_h_a,
+        revenue_ss_employed_next,
+        _hc_after_loss_1_agent(
+            hc_grid_reduced_h_a,
+            wage_loss_factor_vector,
+            wage_loss_reference_vector,
+            period_idx + 1,
+        ),
+        policy_assets_unemployed_loss_now,
+        method=interpolation_method,
+    )
+    revenue_ss_unemployed_loss_next_interpolated = interpolate_2d_ordered_to_unordered(
+        hc_grid_reduced_h_a,
+        assets_grid_h_a,
+        revenue_ss_unemployed_loss_next,
+        hc_grid_reduced_h_a,
+        policy_assets_unemployed_loss_now,
+        method=interpolation_method,
+    )
+    effort_searching_loss_next = interpolate_2d_ordered_to_unordered(
+        hc_grid_reduced_h_a,
+        assets_grid_h_a,
+        policy_effort_searching_loss_next,
+        hc_grid_reduced_h_a,
+        policy_assets_unemployed_loss_now,
+        method=interpolation_method,
+    )
+
+    # calculate current period cost
+    revenue_ss_unemployed_loss = (
+        1
+        / (1 + interest_rate_raw)
         * (
-            effort_searching_loss_next * cost_employed_loss_next_interpolated
-            + (1 - effort_searching_loss_next) * cost_unemployed_loss_next_interpolated
+            effort_searching_loss_next * revenue_ss_employed_loss_next_interpolated
+            + (1 - effort_searching_loss_next)
+            * revenue_ss_unemployed_loss_next_interpolated
         )
     )
 
-    return cost_unemployed_loss
+    return revenue_ss_unemployed_loss
+
+
+def _get_revenue_ui_employed(
+    revenue_ui_employed_next,
+    revenue_ui_unemployed_next,
+    policy_effort_searching_next,
+    policy_assets_employed_now,
+    separation_rate_vector,
+    wage_hc_factor_vector,
+    tax_ui,
+    period_idx,
+):
+
+    # interpolate next period cost functions and search effort policy
+    # to account for increase in hc and choice of assets next period
+    revenue_ui_employed_next_interpolated = interpolate_2d_ordered_to_unordered(
+        hc_grid_reduced_h_a1,
+        assets_grid_h_a1,
+        np.append(
+            revenue_ui_employed_next,
+            revenue_ui_employed_next[:, -1, np.newaxis],
+            axis=1,
+        ),
+        np.minimum(hc_grid_reduced_h_a + 1, hc_max),
+        policy_assets_employed_now,
+        method=interpolation_method,
+    )
+    revenue_ui_unemployed_next_interpolated = interpolate_2d_ordered_to_unordered(
+        hc_grid_reduced_h_a1,
+        assets_grid_h_a1,
+        np.append(
+            revenue_ui_unemployed_next,
+            revenue_ui_unemployed_next[:, -1, np.newaxis],
+            axis=1,
+        ),
+        np.minimum(hc_grid_reduced_h_a + 1, hc_max),
+        policy_assets_employed_now,
+        method=interpolation_method,
+    )
+    effort_searching_plus_next = interpolate_2d_ordered_to_unordered(
+        hc_grid_reduced_h_a1,
+        assets_grid_h_a1,
+        np.append(
+            policy_effort_searching_next,
+            policy_effort_searching_next[:, -1, np.newaxis],
+            axis=1,
+        ),
+        np.minimum(hc_grid_reduced_h_a + 1, hc_max),
+        policy_assets_employed_now,
+        method=interpolation_method,
+    )
+
+    # calculate current period cost
+    revenue_ui_employed = (
+        np.repeat(
+            (tax_ui[period_idx] * wage_level * wage_hc_factor_vector[hc_grid_reduced]),
+            assets_grid_size,
+        ).reshape(hc_grid_reduced_size, assets_grid_size)
+        + 1
+        / (1 + interest_rate_raw)
+        * (1 - separation_rate_vector[period_idx])
+        * revenue_ui_employed_next_interpolated
+        + 1
+        / (1 + interest_rate_raw)
+        * separation_rate_vector[period_idx]
+        * effort_searching_plus_next
+        * revenue_ui_employed_next_interpolated
+        + 1
+        / (1 + interest_rate_raw)
+        * separation_rate_vector[period_idx]
+        * (1 - effort_searching_plus_next)
+        * revenue_ui_unemployed_next_interpolated
+    )
+
+    return revenue_ui_employed
+
+
+def _get_revenue_ui_unemployed(
+    revenue_ui_employed_next,
+    revenue_ui_unemployed_next,
+    revenue_ui_unemployed_loss_next,
+    policy_effort_searching_next,
+    policy_effort_searching_loss_next,
+    policy_assets_unemployed_now,
+    hc_loss_probability,
+    wage_loss_factor_vector,
+    wage_loss_reference_vector,
+    period_idx,
+):
+
+    # interpolate next period cost functions and search effort policy
+    # to account for hc loss and choice of assets next period
+    revenue_ui_employed_next_interpolated = interpolate_2d_ordered_to_unordered(
+        hc_grid_reduced_h_a,
+        assets_grid_h_a,
+        revenue_ui_employed_next,
+        hc_grid_reduced_h_a,
+        policy_assets_unemployed_now,
+        method=interpolation_method,
+    )
+    revenue_ui_unemployed_next_interpolated = interpolate_2d_ordered_to_unordered(
+        hc_grid_reduced_h_a,
+        assets_grid_h_a,
+        revenue_ui_unemployed_next,
+        hc_grid_reduced_h_a,
+        policy_assets_unemployed_now,
+        method=interpolation_method,
+    )
+    revenue_ui_unemployed_loss_next_interpolated = interpolate_2d_ordered_to_unordered(
+        hc_grid_reduced_h_a,
+        assets_grid_h_a,
+        revenue_ui_unemployed_loss_next,
+        hc_grid_reduced_h_a,
+        policy_assets_unemployed_now,
+        method=interpolation_method,
+    )
+    revenue_ui_employed_loss_next_interpolated = interpolate_2d_ordered_to_unordered(
+        hc_grid_reduced_h_a,
+        assets_grid_h_a,
+        revenue_ui_employed_next,
+        _hc_after_loss_1_agent(
+            hc_grid_reduced_h_a,
+            wage_loss_factor_vector,
+            wage_loss_reference_vector,
+            period_idx + 1,
+        ),
+        policy_assets_unemployed_now,
+        method=interpolation_method,
+    )
+    effort_searching_next = interpolate_2d_ordered_to_unordered(
+        hc_grid_reduced_h_a,
+        assets_grid_h_a,
+        policy_effort_searching_next,
+        hc_grid_reduced_h_a,
+        policy_assets_unemployed_now,
+        method=interpolation_method,
+    )
+    effort_searching_loss_next = interpolate_2d_ordered_to_unordered(
+        hc_grid_reduced_h_a,
+        assets_grid_h_a,
+        policy_effort_searching_loss_next,
+        hc_grid_reduced_h_a,
+        policy_assets_unemployed_now,
+        method=interpolation_method,
+    )
+
+    # calculate current period cost
+    revenue_ui_unemployed = 1 / (1 + interest_rate_raw) * (1 - hc_loss_probability) * (
+        job_finding_probability(effort_searching_next)
+        * revenue_ui_employed_next_interpolated
+        + (1 - job_finding_probability(effort_searching_next))
+        * revenue_ui_unemployed_next_interpolated
+    ) + 1 / (1 + interest_rate_raw) * hc_loss_probability * (
+        job_finding_probability(effort_searching_loss_next)
+        * revenue_ui_employed_loss_next_interpolated
+        + (1 - job_finding_probability(effort_searching_loss_next))
+        * revenue_ui_unemployed_loss_next_interpolated
+    )
+
+    return revenue_ui_unemployed
+
+
+def _get_revenue_ui_unemployed_loss(
+    revenue_ui_employed_next,
+    revenue_ui_unemployed_loss_next,
+    policy_effort_searching_loss_next,
+    policy_assets_unemployed_loss_now,
+    wage_loss_factor_vector,
+    wage_loss_reference_vector,
+    period_idx,
+):
+
+    # interpolate next period cost functions and search effort policy
+    # to account for hc loss and choice of assets next period
+    revenue_ui_employed_loss_next_interpolated = interpolate_2d_ordered_to_unordered(
+        hc_grid_reduced_h_a,
+        assets_grid_h_a,
+        revenue_ui_employed_next,
+        _hc_after_loss_1_agent(
+            hc_grid_reduced_h_a,
+            wage_loss_factor_vector,
+            wage_loss_reference_vector,
+            period_idx + 1,
+        ),
+        policy_assets_unemployed_loss_now,
+        method=interpolation_method,
+    )
+    revenue_ui_unemployed_loss_next_interpolated = interpolate_2d_ordered_to_unordered(
+        hc_grid_reduced_h_a,
+        assets_grid_h_a,
+        revenue_ui_unemployed_loss_next,
+        hc_grid_reduced_h_a,
+        policy_assets_unemployed_loss_now,
+        method=interpolation_method,
+    )
+    effort_searching_loss_next = interpolate_2d_ordered_to_unordered(
+        hc_grid_reduced_h_a,
+        assets_grid_h_a,
+        policy_effort_searching_loss_next,
+        hc_grid_reduced_h_a,
+        policy_assets_unemployed_loss_now,
+        method=interpolation_method,
+    )
+
+    # calculate current period cost
+    revenue_ui_unemployed_loss = (
+        1
+        / (1 + interest_rate_raw)
+        * (
+            effort_searching_loss_next * revenue_ui_employed_loss_next_interpolated
+            + (1 - effort_searching_loss_next)
+            * revenue_ui_unemployed_loss_next_interpolated
+        )
+    )
+
+    return revenue_ui_unemployed_loss
+
+
+def _get_revenue_lumpsum_employed(
+    revenue_lumpsum_employed_next,
+    revenue_lumpsum_unemployed_next,
+    policy_effort_searching_next,
+    policy_assets_employed_now,
+    separation_rate_vector,
+    wage_hc_factor_vector,
+    tax_income,
+    period_idx,
+):
+
+    # interpolate next period cost functions and search effort policy
+    # to account for increase in hc and choice of assets next period
+    revenue_lumpsum_employed_next_interpolated = interpolate_2d_ordered_to_unordered(
+        hc_grid_reduced_h_a1,
+        assets_grid_h_a1,
+        np.append(
+            revenue_lumpsum_employed_next,
+            revenue_lumpsum_employed_next[:, -1, np.newaxis],
+            axis=1,
+        ),
+        np.minimum(hc_grid_reduced_h_a + 1, hc_max),
+        policy_assets_employed_now,
+        method=interpolation_method,
+    )
+    revenue_lumpsum_unemployed_next_interpolated = interpolate_2d_ordered_to_unordered(
+        hc_grid_reduced_h_a1,
+        assets_grid_h_a1,
+        np.append(
+            revenue_lumpsum_unemployed_next,
+            revenue_lumpsum_unemployed_next[:, -1, np.newaxis],
+            axis=1,
+        ),
+        np.minimum(hc_grid_reduced_h_a + 1, hc_max),
+        policy_assets_employed_now,
+        method=interpolation_method,
+    )
+    effort_searching_plus_next = interpolate_2d_ordered_to_unordered(
+        hc_grid_reduced_h_a1,
+        assets_grid_h_a1,
+        np.append(
+            policy_effort_searching_next,
+            policy_effort_searching_next[:, -1, np.newaxis],
+            axis=1,
+        ),
+        np.minimum(hc_grid_reduced_h_a + 1, hc_max),
+        policy_assets_employed_now,
+        method=interpolation_method,
+    )
+
+    # calculate current period cost
+    revenue_lumpsum_employed = (
+        np.repeat(
+            (tax_income * wage_level * wage_hc_factor_vector[hc_grid_reduced]),
+            assets_grid_size,
+        ).reshape(hc_grid_reduced_size, assets_grid_size)
+        + tax_income * interest_rate_raw * assets_grid_h_a
+        + 1
+        / (1 + interest_rate_raw)
+        * (1 - separation_rate_vector[period_idx])
+        * revenue_lumpsum_employed_next_interpolated
+        + 1
+        / (1 + interest_rate_raw)
+        * separation_rate_vector[period_idx]
+        * effort_searching_plus_next
+        * revenue_lumpsum_employed_next_interpolated
+        + 1
+        / (1 + interest_rate_raw)
+        * separation_rate_vector[period_idx]
+        * (1 - effort_searching_plus_next)
+        * revenue_lumpsum_unemployed_next_interpolated
+    )
+
+    return revenue_lumpsum_employed
+
+
+def _get_revenue_lumpsum_unemployed(
+    revenue_lumpsum_employed_next,
+    revenue_lumpsum_unemployed_next,
+    revenue_lumpsum_unemployed_loss_next,
+    policy_effort_searching_next,
+    policy_effort_searching_loss_next,
+    policy_assets_unemployed_now,
+    hc_loss_probability,
+    wage_loss_factor_vector,
+    wage_loss_reference_vector,
+    tax_income,
+    period_idx,
+):
+
+    # interpolate next period cost functions and search effort policy
+    # to account for hc loss and choice of assets next period
+    revenue_lumpsum_employed_next_interpolated = interpolate_2d_ordered_to_unordered(
+        hc_grid_reduced_h_a,
+        assets_grid_h_a,
+        revenue_lumpsum_employed_next,
+        hc_grid_reduced_h_a,
+        policy_assets_unemployed_now,
+        method=interpolation_method,
+    )
+    revenue_lumpsum_unemployed_next_interpolated = interpolate_2d_ordered_to_unordered(
+        hc_grid_reduced_h_a,
+        assets_grid_h_a,
+        revenue_lumpsum_unemployed_next,
+        hc_grid_reduced_h_a,
+        policy_assets_unemployed_now,
+        method=interpolation_method,
+    )
+    revenue_lumpsum_unemployed_loss_next_interpolated = (
+        interpolate_2d_ordered_to_unordered(
+            hc_grid_reduced_h_a,
+            assets_grid_h_a,
+            revenue_lumpsum_unemployed_loss_next,
+            hc_grid_reduced_h_a,
+            policy_assets_unemployed_now,
+            method=interpolation_method,
+        )
+    )
+    revenue_lumpsum_employed_loss_next_interpolated = (
+        interpolate_2d_ordered_to_unordered(
+            hc_grid_reduced_h_a,
+            assets_grid_h_a,
+            revenue_lumpsum_employed_next,
+            _hc_after_loss_1_agent(
+                hc_grid_reduced_h_a,
+                wage_loss_factor_vector,
+                wage_loss_reference_vector,
+                period_idx + 1,
+            ),
+            policy_assets_unemployed_now,
+            method=interpolation_method,
+        )
+    )
+    effort_searching_next = interpolate_2d_ordered_to_unordered(
+        hc_grid_reduced_h_a,
+        assets_grid_h_a,
+        policy_effort_searching_next,
+        hc_grid_reduced_h_a,
+        policy_assets_unemployed_now,
+        method=interpolation_method,
+    )
+    effort_searching_loss_next = interpolate_2d_ordered_to_unordered(
+        hc_grid_reduced_h_a,
+        assets_grid_h_a,
+        policy_effort_searching_loss_next,
+        hc_grid_reduced_h_a,
+        policy_assets_unemployed_now,
+        method=interpolation_method,
+    )
+
+    # calculate current period cost
+    revenue_lumpsum_unemployed = (
+        tax_income * interest_rate_raw * assets_grid_h_a
+        + 1
+        / (1 + interest_rate_raw)
+        * (1 - hc_loss_probability)
+        * (
+            job_finding_probability(effort_searching_next)
+            * revenue_lumpsum_employed_next_interpolated
+            + (1 - job_finding_probability(effort_searching_next))
+            * revenue_lumpsum_unemployed_next_interpolated
+        )
+        + 1
+        / (1 + interest_rate_raw)
+        * hc_loss_probability
+        * (
+            job_finding_probability(effort_searching_loss_next)
+            * revenue_lumpsum_employed_loss_next_interpolated
+            + (1 - job_finding_probability(effort_searching_loss_next))
+            * revenue_lumpsum_unemployed_loss_next_interpolated
+        )
+    )
+
+    return revenue_lumpsum_unemployed
+
+
+def _get_revenue_lumpsum_unemployed_loss(
+    revenue_lumpsum_employed_next,
+    revenue_lumpsum_unemployed_loss_next,
+    policy_effort_searching_loss_next,
+    policy_assets_unemployed_loss_now,
+    wage_loss_factor_vector,
+    wage_loss_reference_vector,
+    tax_income,
+    period_idx,
+):
+
+    # interpolate next period cost functions and search effort policy
+    # to account for hc loss and choice of assets next period
+    revenue_lumpsum_employed_loss_next_interpolated = (
+        interpolate_2d_ordered_to_unordered(
+            hc_grid_reduced_h_a,
+            assets_grid_h_a,
+            revenue_lumpsum_employed_next,
+            _hc_after_loss_1_agent(
+                hc_grid_reduced_h_a,
+                wage_loss_factor_vector,
+                wage_loss_reference_vector,
+                period_idx + 1,
+            ),
+            policy_assets_unemployed_loss_now,
+            method=interpolation_method,
+        )
+    )
+    revenue_lumpsum_unemployed_loss_next_interpolated = (
+        interpolate_2d_ordered_to_unordered(
+            hc_grid_reduced_h_a,
+            assets_grid_h_a,
+            revenue_lumpsum_unemployed_loss_next,
+            hc_grid_reduced_h_a,
+            policy_assets_unemployed_loss_now,
+            method=interpolation_method,
+        )
+    )
+    effort_searching_loss_next = interpolate_2d_ordered_to_unordered(
+        hc_grid_reduced_h_a,
+        assets_grid_h_a,
+        policy_effort_searching_loss_next,
+        hc_grid_reduced_h_a,
+        policy_assets_unemployed_loss_now,
+        method=interpolation_method,
+    )
+
+    # calculate current period cost
+    revenue_lumpsum_unemployed_loss = (
+        tax_income * interest_rate_raw * assets_grid_h_a
+        + 1
+        / (1 + interest_rate_raw)
+        * (
+            effort_searching_loss_next * revenue_lumpsum_employed_loss_next_interpolated
+            + (1 - effort_searching_loss_next)
+            * revenue_lumpsum_unemployed_loss_next_interpolated
+        )
+    )
+
+    return revenue_lumpsum_unemployed_loss
+
+
+def _get_revenue_consumption_employed(
+    revenue_consumption_employed_next,
+    revenue_consumption_unemployed_next,
+    policy_consumption_employed_now,
+    policy_effort_searching_next,
+    policy_assets_employed_now,
+    separation_rate_vector,
+    tax_consumption,
+    period_idx,
+):
+
+    # interpolate next period cost functions and search effort policy
+    # to account for increase in hc and choice of assets next period
+    revenue_consumption_employed_next_interpolated = (
+        interpolate_2d_ordered_to_unordered(
+            hc_grid_reduced_h_a1,
+            assets_grid_h_a1,
+            np.append(
+                revenue_consumption_employed_next,
+                revenue_consumption_employed_next[:, -1, np.newaxis],
+                axis=1,
+            ),
+            np.minimum(hc_grid_reduced_h_a + 1, hc_max),
+            policy_assets_employed_now,
+            method=interpolation_method,
+        )
+    )
+    revenue_consumption_unemployed_next_interpolated = (
+        interpolate_2d_ordered_to_unordered(
+            hc_grid_reduced_h_a1,
+            assets_grid_h_a1,
+            np.append(
+                revenue_consumption_unemployed_next,
+                revenue_consumption_unemployed_next[:, -1, np.newaxis],
+                axis=1,
+            ),
+            np.minimum(hc_grid_reduced_h_a + 1, hc_max),
+            policy_assets_employed_now,
+            method=interpolation_method,
+        )
+    )
+    effort_searching_plus_next = interpolate_2d_ordered_to_unordered(
+        hc_grid_reduced_h_a1,
+        assets_grid_h_a1,
+        np.append(
+            policy_effort_searching_next,
+            policy_effort_searching_next[:, -1, np.newaxis],
+            axis=1,
+        ),
+        np.minimum(hc_grid_reduced_h_a + 1, hc_max),
+        policy_assets_employed_now,
+        method=interpolation_method,
+    )
+
+    # calculate current period cost
+    revenue_consumption_employed = (
+        tax_consumption * policy_consumption_employed_now
+        + 1
+        / (1 + interest_rate_raw)
+        * (1 - separation_rate_vector[period_idx])
+        * revenue_consumption_employed_next_interpolated
+        + 1
+        / (1 + interest_rate_raw)
+        * separation_rate_vector[period_idx]
+        * effort_searching_plus_next
+        * revenue_consumption_employed_next_interpolated
+        + 1
+        / (1 + interest_rate_raw)
+        * separation_rate_vector[period_idx]
+        * (1 - effort_searching_plus_next)
+        * revenue_consumption_unemployed_next_interpolated
+    )
+
+    return revenue_consumption_employed
+
+
+def _get_revenue_consumption_unemployed(
+    revenue_consumption_employed_next,
+    revenue_consumption_unemployed_next,
+    revenue_consumption_unemployed_loss_next,
+    policy_consumption_unemployed_now,
+    policy_effort_searching_next,
+    policy_effort_searching_loss_next,
+    policy_assets_unemployed_now,
+    hc_loss_probability,
+    wage_loss_factor_vector,
+    wage_loss_reference_vector,
+    tax_consumption,
+    period_idx,
+):
+
+    # interpolate next period cost functions and search effort policy
+    # to account for hc loss and choice of assets next period
+    revenue_consumption_employed_next_interpolated = (
+        interpolate_2d_ordered_to_unordered(
+            hc_grid_reduced_h_a,
+            assets_grid_h_a,
+            revenue_consumption_employed_next,
+            hc_grid_reduced_h_a,
+            policy_assets_unemployed_now,
+            method=interpolation_method,
+        )
+    )
+    revenue_consumption_unemployed_next_interpolated = (
+        interpolate_2d_ordered_to_unordered(
+            hc_grid_reduced_h_a,
+            assets_grid_h_a,
+            revenue_consumption_unemployed_next,
+            hc_grid_reduced_h_a,
+            policy_assets_unemployed_now,
+            method=interpolation_method,
+        )
+    )
+    revenue_consumption_unemployed_loss_next_interpolated = (
+        interpolate_2d_ordered_to_unordered(
+            hc_grid_reduced_h_a,
+            assets_grid_h_a,
+            revenue_consumption_unemployed_loss_next,
+            hc_grid_reduced_h_a,
+            policy_assets_unemployed_now,
+            method=interpolation_method,
+        )
+    )
+    revenue_consumption_employed_loss_next_interpolated = (
+        interpolate_2d_ordered_to_unordered(
+            hc_grid_reduced_h_a,
+            assets_grid_h_a,
+            revenue_consumption_employed_next,
+            _hc_after_loss_1_agent(
+                hc_grid_reduced_h_a,
+                wage_loss_factor_vector,
+                wage_loss_reference_vector,
+                period_idx + 1,
+            ),
+            policy_assets_unemployed_now,
+            method=interpolation_method,
+        )
+    )
+    effort_searching_next = interpolate_2d_ordered_to_unordered(
+        hc_grid_reduced_h_a,
+        assets_grid_h_a,
+        policy_effort_searching_next,
+        hc_grid_reduced_h_a,
+        policy_assets_unemployed_now,
+        method=interpolation_method,
+    )
+    effort_searching_loss_next = interpolate_2d_ordered_to_unordered(
+        hc_grid_reduced_h_a,
+        assets_grid_h_a,
+        policy_effort_searching_loss_next,
+        hc_grid_reduced_h_a,
+        policy_assets_unemployed_now,
+        method=interpolation_method,
+    )
+
+    # calculate current period cost
+    revenue_consumption_unemployed = (
+        tax_consumption * policy_consumption_unemployed_now
+        + 1
+        / (1 + interest_rate_raw)
+        * (1 - hc_loss_probability)
+        * (
+            job_finding_probability(effort_searching_next)
+            * revenue_consumption_employed_next_interpolated
+            + (1 - job_finding_probability(effort_searching_next))
+            * revenue_consumption_unemployed_next_interpolated
+        )
+        + 1
+        / (1 + interest_rate_raw)
+        * hc_loss_probability
+        * (
+            job_finding_probability(effort_searching_loss_next)
+            * revenue_consumption_employed_loss_next_interpolated
+            + (1 - job_finding_probability(effort_searching_loss_next))
+            * revenue_consumption_unemployed_loss_next_interpolated
+        )
+    )
+
+    return revenue_consumption_unemployed
+
+
+def _get_revenue_consumption_unemployed_loss(
+    revenue_consumption_employed_next,
+    revenue_consumption_unemployed_loss_next,
+    policy_consumption_unemployed_loss_now,
+    policy_effort_searching_loss_next,
+    policy_assets_unemployed_loss_now,
+    wage_loss_factor_vector,
+    wage_loss_reference_vector,
+    tax_consumption,
+    period_idx,
+):
+
+    # interpolate next period cost functions and search effort policy
+    # to account for hc loss and choice of assets next period
+    revenue_consumption_employed_loss_next_interpolated = (
+        interpolate_2d_ordered_to_unordered(
+            hc_grid_reduced_h_a,
+            assets_grid_h_a,
+            revenue_consumption_employed_next,
+            _hc_after_loss_1_agent(
+                hc_grid_reduced_h_a,
+                wage_loss_factor_vector,
+                wage_loss_reference_vector,
+                period_idx + 1,
+            ),
+            policy_assets_unemployed_loss_now,
+            method=interpolation_method,
+        )
+    )
+    revenue_consumption_unemployed_loss_next_interpolated = (
+        interpolate_2d_ordered_to_unordered(
+            hc_grid_reduced_h_a,
+            assets_grid_h_a,
+            revenue_consumption_unemployed_loss_next,
+            hc_grid_reduced_h_a,
+            policy_assets_unemployed_loss_now,
+            method=interpolation_method,
+        )
+    )
+    effort_searching_loss_next = interpolate_2d_ordered_to_unordered(
+        hc_grid_reduced_h_a,
+        assets_grid_h_a,
+        policy_effort_searching_loss_next,
+        hc_grid_reduced_h_a,
+        policy_assets_unemployed_loss_now,
+        method=interpolation_method,
+    )
+
+    # calculate current period cost
+    revenue_consumption_unemployed_loss = (
+        tax_consumption * policy_consumption_unemployed_loss_now
+        + 1
+        / (1 + interest_rate_raw)
+        * (
+            effort_searching_loss_next
+            * revenue_consumption_employed_loss_next_interpolated
+            + (1 - effort_searching_loss_next)
+            * revenue_consumption_unemployed_loss_next_interpolated
+        )
+    )
+
+    return revenue_consumption_unemployed_loss
 
 
 @nb.njit
@@ -560,18 +1485,18 @@ def _get_value_employed(
 ):
     # expand interpolation grid
     consumption_diff = -npf.pmt(
-        interest_rate,
+        (1 - discount_factor) / discount_factor,
         n_periods_retired + (n_periods_working - (period_idx + 1)),
         assets_max - np.amax(assets_grid),
     )
     value_employed_diff = -npf.pv(
-        interest_rate,
+        (1 - discount_factor) / discount_factor,
         n_periods_retired + (n_periods_working - (period_idx + 1)),
         consumption_utility(policy_consumption_employed_next[:, -1] + consumption_diff)
         - consumption_utility(policy_consumption_employed_next[:, -1]),
     )
     value_unemployed_diff = -npf.pv(
-        interest_rate,
+        (1 - discount_factor) / discount_factor,
         n_periods_retired + (n_periods_working - (period_idx + 1)),
         consumption_utility(
             policy_consumption_unemployed_next[:, -1] + consumption_diff
@@ -582,26 +1507,26 @@ def _get_value_employed(
     # interpolate continuation value on grid to reflect increase in
     # hc and choice for assets next period
     continuation_value_employed = interpolate_2d_ordered_to_unordered(
-        hc_grid_reduced_e_a1,
-        assets_grid_e_a1,
+        hc_grid_reduced_h_a1,
+        assets_grid_h_a1,
         np.append(
             value_employed_next,
             (value_employed_next[:, -1] + value_employed_diff)[..., np.newaxis],
             axis=1,
         ),
-        np.minimum(hc_grid_reduced_e_a + 1, hc_max),
+        np.minimum(hc_grid_reduced_h_a + 1, hc_max),
         assets_next,
         method=interpolation_method,
     )
     continuation_value_searching = interpolate_2d_ordered_to_unordered(
-        hc_grid_reduced_e_a1,
-        assets_grid_e_a1,
+        hc_grid_reduced_h_a1,
+        assets_grid_h_a1,
         np.append(
             value_searching_next,
             (value_searching_next[:, -1] + value_unemployed_diff)[..., np.newaxis],
             axis=1,
         ),
-        np.minimum(hc_grid_reduced_e_a + 1, hc_max),
+        np.minimum(hc_grid_reduced_h_a + 1, hc_max),
         assets_next,
         method=interpolation_method,
     )
@@ -630,18 +1555,18 @@ def _get_value_unemployed(
     # interpolate continuation value on grid to reflect choice for
     # assets next period
     continuation_value_searching = interpolate_2d_ordered_to_unordered(
-        hc_grid_reduced_e_a,
-        assets_grid_e_a,
+        hc_grid_reduced_h_a,
+        assets_grid_h_a,
         value_searching_next,
-        hc_grid_reduced_e_a,
+        hc_grid_reduced_h_a,
         assets_next,
         method=interpolation_method,
     )
     continuation_value_searching_loss = interpolate_2d_ordered_to_unordered(
-        hc_grid_reduced_e_a,
-        assets_grid_e_a,
+        hc_grid_reduced_h_a,
+        assets_grid_h_a,
         value_searching_loss_next,
-        hc_grid_reduced_e_a,
+        hc_grid_reduced_h_a,
         assets_next,
         method=interpolation_method,
     )
@@ -663,10 +1588,10 @@ def _get_value_unemployed_loss(
 ):
     # interpolate continuation value on grid
     continuation_value_searching_loss = interpolate_2d_ordered_to_unordered(
-        hc_grid_reduced_e_a,
-        assets_grid_e_a,
+        hc_grid_reduced_h_a,
+        assets_grid_h_a,
         value_searching_next,
-        hc_grid_reduced_e_a,
+        hc_grid_reduced_h_a,
         assets_next,
         method=interpolation_method,
     )
@@ -686,31 +1611,31 @@ def _interpolate_consumption_on_grid(
 ):
     # interpolate consumption on grid
     consumption_on_grid = interpolate_2d_unordered_to_unordered_iter(
-        hc_grid_reduced_e_a,
+        hc_grid_reduced_h_a,
         assets_off_grid.astype(float),
         consumption_off_grid.astype(float),
-        hc_grid_reduced_e_a,
-        assets_grid_e_a,
+        hc_grid_reduced_h_a,
+        assets_grid_h_a,
         method=interpolation_method,
     )
 
     # # interpolate consumption on grid
     # consumption_on_grid = interpolate_2d_unordered_to_unordered(
-    #     hc_grid_reduced_e_a,
+    #     hc_grid_reduced_h_a,
     #     assets_off_grid,
     #     consumption_off_grid,
-    #     hc_grid_reduced_e_a,
-    #     assets_grid_e_a,
+    #     hc_grid_reduced_h_a,
+    #     assets_grid_h_a,
     #     method=method_2d
     # )
     # # fill values outside convex hull with nearest neighbor
     # if np.any(np.isnan(consumption_on_grid)):
     #     consumption_fill = interpolate_2d_unordered_to_unordered(
-    #         hc_grid_reduced_e_a,
+    #         hc_grid_reduced_h_a,
     #         assets_off_grid,
     #         consumption_off_grid,
-    #         hc_grid_reduced_e_a,
-    #         assets_grid_e_a,
+    #         hc_grid_reduced_h_a,
+    #         assets_grid_h_a,
     #         method="nearest",
     #     )
     #     consumption_on_grid[np.isnan(consumption_on_grid)] = consumption_fill[
@@ -723,15 +1648,21 @@ def _interpolate_consumption_on_grid(
 def _invert_bc_employed(
     consumption_off_grid,
     wage_hc_factor_grid,
-    income_tax_rate_vector,
+    tax_ss,
+    tax_ui,
+    tax_income,
+    transfers_lumpsum,
     period_idx,
 ):
 
-    assets_off_grid = discount_factor * (
-        assets_grid_e_a
-        - (1 - income_tax_rate_vector[period_idx]) * wage_level * wage_hc_factor_grid
-        + consumption_off_grid
-    )
+    assets_off_grid = (
+        consumption_off_grid
+        + assets_grid_h_a
+        - transfers_lumpsum
+        - (1 - tax_ss + tax_ui[period_idx] - tax_income)
+        * wage_level
+        * wage_hc_factor_grid
+    ) / (1 + (1 - tax_income) * interest_rate_raw)
 
     return assets_off_grid
 
@@ -739,6 +1670,8 @@ def _invert_bc_employed(
 def _invert_bc_unemployed(
     consumption_off_grid,
     wage_hc_factor_grid,
+    tax_income,
+    transfers_lumpsum,
     ui_replacement_rate_vector,
     ui_floor,
     ui_cap,
@@ -753,9 +1686,9 @@ def _invert_bc_unemployed(
         period_idx,
     )
 
-    assets_off_grid = discount_factor * (
-        assets_grid_e_a - benefits + consumption_off_grid
-    )
+    assets_off_grid = (
+        consumption_off_grid + assets_grid_h_a - transfers_lumpsum - benefits
+    ) / (1 + (1 - tax_income) * interest_rate_raw)
 
     return assets_off_grid
 
@@ -763,13 +1696,19 @@ def _invert_bc_unemployed(
 def _solve_bc_employed(
     consumption_now,
     wage_hc_factor_grid,
-    income_tax_rate_vector,
+    tax_ss,
+    tax_ui,
+    tax_income,
+    transfers_lumpsum,
     period_idx,
 ):
 
     assets_next = (
-        assets_grid_e_a * (1 + interest_rate)
-        + (1 - income_tax_rate_vector[period_idx]) * wage_level * wage_hc_factor_grid
+        assets_grid_h_a * (1 + (1 - tax_income) * interest_rate_raw)
+        + (1 - tax_ss - tax_ui[period_idx] - tax_income)
+        * wage_level
+        * wage_hc_factor_grid
+        + transfers_lumpsum
         - consumption_now
     )
 
@@ -779,6 +1718,8 @@ def _solve_bc_employed(
 def _solve_bc_unemployed(
     consumption_now,
     wage_hc_factor_grid,
+    tax_income,
+    transfers_lumpsum,
     ui_replacement_rate_vector,
     ui_floor,
     ui_cap,
@@ -793,7 +1734,12 @@ def _solve_bc_unemployed(
         period_idx,
     )
 
-    assets_next = assets_grid_e_a * (1 + interest_rate) + benefits - consumption_now
+    assets_next = (
+        assets_grid_h_a * (1 + (1 - tax_income) * interest_rate_raw)
+        + benefits
+        + transfers_lumpsum
+        - consumption_now
+    )
 
     return assets_next
 
@@ -807,17 +1753,28 @@ def _solve_one_period(
     value_employed_next,
     value_searching_next,
     value_searching_loss_next,
-    cost_employed_next,
-    cost_unemployed_next,
-    cost_unemployed_loss_next,
+    cost_ui_employed_next,
+    cost_ui_unemployed_next,
+    cost_ui_unemployed_loss_next,
     hc_loss_probability,
+    revenue_ss_employed_next,
+    revenue_ss_unemployed_next,
+    revenue_ss_unemployed_loss_next,
+    revenue_ui_employed_next,
+    revenue_ui_unemployed_next,
+    revenue_ui_unemployed_loss_next,
+    revenue_lumpsum_employed_next,
+    revenue_lumpsum_unemployed_next,
+    revenue_lumpsum_unemployed_loss_next,
     separation_rate_vector,
     wage_hc_factor_grid,
     wage_hc_factor_vector,
     wage_loss_factor_vector,
     wage_loss_reference_vector,
-    consumption_tax_rate,
-    income_tax_rate_vector,
+    tax_ss,
+    tax_ui,
+    tax_income,
+    transfers_lumpsum,
     ui_replacement_rate_vector,
     ui_floor,
     ui_cap,
@@ -836,6 +1793,8 @@ def _solve_one_period(
         wage_hc_factor_grid,
         wage_loss_factor_vector,
         wage_loss_reference_vector,
+        tax_income,
+        transfers_lumpsum,
         ui_replacement_rate_vector,
         ui_floor,
         ui_cap,
@@ -859,6 +1818,8 @@ def _solve_one_period(
         wage_hc_factor_grid,
         wage_loss_factor_vector,
         wage_loss_reference_vector,
+        tax_income,
+        transfers_lumpsum,
         ui_replacement_rate_vector,
         ui_floor,
         ui_cap,
@@ -878,7 +1839,10 @@ def _solve_one_period(
         value_searching_next,
         separation_rate_vector,
         wage_hc_factor_grid,
-        income_tax_rate_vector,
+        tax_ss,
+        tax_ui,
+        tax_income,
+        transfers_lumpsum,
         period_idx,
     )
 
@@ -897,27 +1861,24 @@ def _solve_one_period(
         period_idx,
     )
 
-    # update cost functions
-    cost_unemployed_loss_now = _get_cost_unemployed_loss(
-        cost_employed_next,
-        cost_unemployed_loss_next,
-        policy_consumption_unemployed_loss_now,
+    # update revenue and cost functions
+    cost_ui_unemployed_loss_now = _get_cost_ui_unemployed_loss(
+        cost_ui_employed_next,
+        cost_ui_unemployed_loss_next,
         policy_effort_searching_loss_next,
         policy_assets_unemployed_loss_now,
         wage_hc_factor_vector,
         wage_loss_factor_vector,
         wage_loss_reference_vector,
-        consumption_tax_rate,
         ui_replacement_rate_vector,
         ui_floor,
         ui_cap,
         period_idx,
     )
-    cost_unemployed_now = _get_cost_unemployed(
-        cost_employed_next,
-        cost_unemployed_next,
-        cost_unemployed_loss_next,
-        policy_consumption_unemployed_now,
+    cost_ui_unemployed_now = _get_cost_ui_unemployed(
+        cost_ui_employed_next,
+        cost_ui_unemployed_next,
+        cost_ui_unemployed_loss_next,
         policy_effort_searching_next,
         policy_effort_searching_loss_next,
         policy_assets_unemployed_now,
@@ -925,22 +1886,115 @@ def _solve_one_period(
         wage_hc_factor_vector,
         wage_loss_factor_vector,
         wage_loss_reference_vector,
-        consumption_tax_rate,
         ui_replacement_rate_vector,
         ui_floor,
         ui_cap,
         period_idx,
     )
-    cost_employed_now = _get_cost_employed(
-        cost_employed_next,
-        cost_unemployed_next,
-        policy_consumption_employed_now,
+    cost_ui_employed_now = _get_cost_ui_employed(
+        cost_ui_employed_next,
+        cost_ui_unemployed_next,
+        policy_effort_searching_next,
+        policy_assets_employed_now,
+        separation_rate_vector,
+        period_idx,
+    )
+
+    revenue_ss_unemployed_loss_now = _get_revenue_ss_unemployed_loss(
+        revenue_ss_employed_next,
+        revenue_ss_unemployed_loss_next,
+        policy_effort_searching_loss_next,
+        policy_assets_unemployed_loss_now,
+        wage_loss_factor_vector,
+        wage_loss_reference_vector,
+        period_idx,
+    )
+    revenue_ss_unemployed_now = _get_revenue_ss_unemployed(
+        revenue_ss_employed_next,
+        revenue_ss_unemployed_next,
+        revenue_ss_unemployed_loss_next,
+        policy_effort_searching_next,
+        policy_effort_searching_loss_next,
+        policy_assets_unemployed_now,
+        hc_loss_probability,
+        wage_loss_factor_vector,
+        wage_loss_reference_vector,
+        period_idx,
+    )
+    revenue_ss_employed_now = _get_revenue_ss_employed(
+        revenue_ss_employed_next,
+        revenue_ss_unemployed_next,
         policy_effort_searching_next,
         policy_assets_employed_now,
         separation_rate_vector,
         wage_hc_factor_vector,
-        consumption_tax_rate,
-        income_tax_rate_vector,
+        tax_ss,
+        period_idx,
+    )
+
+    revenue_ui_unemployed_loss_now = _get_revenue_ui_unemployed_loss(
+        revenue_ui_employed_next,
+        revenue_ui_unemployed_loss_next,
+        policy_effort_searching_loss_next,
+        policy_assets_unemployed_loss_now,
+        wage_loss_factor_vector,
+        wage_loss_reference_vector,
+        period_idx,
+    )
+    revenue_ui_unemployed_now = _get_revenue_ui_unemployed(
+        revenue_ui_employed_next,
+        revenue_ui_unemployed_next,
+        revenue_ui_unemployed_loss_next,
+        policy_effort_searching_next,
+        policy_effort_searching_loss_next,
+        policy_assets_unemployed_now,
+        hc_loss_probability,
+        wage_loss_factor_vector,
+        wage_loss_reference_vector,
+        period_idx,
+    )
+    revenue_ui_employed_now = _get_revenue_ui_employed(
+        revenue_ui_employed_next,
+        revenue_ui_unemployed_next,
+        policy_effort_searching_next,
+        policy_assets_employed_now,
+        separation_rate_vector,
+        wage_hc_factor_vector,
+        tax_ui,
+        period_idx,
+    )
+
+    revenue_lumpsum_unemployed_loss_now = _get_revenue_lumpsum_unemployed_loss(
+        revenue_lumpsum_employed_next,
+        revenue_lumpsum_unemployed_loss_next,
+        policy_effort_searching_loss_next,
+        policy_assets_unemployed_loss_now,
+        wage_loss_factor_vector,
+        wage_loss_reference_vector,
+        tax_income,
+        period_idx,
+    )
+    revenue_lumpsum_unemployed_now = _get_revenue_lumpsum_unemployed(
+        revenue_lumpsum_employed_next,
+        revenue_lumpsum_unemployed_next,
+        revenue_lumpsum_unemployed_loss_next,
+        policy_effort_searching_next,
+        policy_effort_searching_loss_next,
+        policy_assets_unemployed_now,
+        hc_loss_probability,
+        wage_loss_factor_vector,
+        wage_loss_reference_vector,
+        tax_income,
+        period_idx,
+    )
+    revenue_lumpsum_employed_now = _get_revenue_lumpsum_employed(
+        revenue_lumpsum_employed_next,
+        revenue_lumpsum_unemployed_next,
+        policy_effort_searching_next,
+        policy_assets_employed_now,
+        separation_rate_vector,
+        wage_hc_factor_vector,
+        tax_income,
         period_idx,
     )
 
@@ -955,9 +2009,18 @@ def _solve_one_period(
         value_unemployed_loss_now,
         value_searching_now,
         value_searching_loss_now,
-        cost_employed_now,
-        cost_unemployed_now,
-        cost_unemployed_loss_now,
+        cost_ui_employed_now,
+        cost_ui_unemployed_now,
+        cost_ui_unemployed_loss_now,
+        revenue_ss_employed_now,
+        revenue_ss_unemployed_now,
+        revenue_ss_unemployed_loss_now,
+        revenue_ui_employed_now,
+        revenue_ui_unemployed_now,
+        revenue_ui_unemployed_loss_now,
+        revenue_lumpsum_employed_now,
+        revenue_lumpsum_unemployed_now,
+        revenue_lumpsum_unemployed_loss_now,
     )
 
 
@@ -969,7 +2032,10 @@ def _solve_employed(
     value_searching_next,
     separation_rate_vector,
     wage_hc_factor_grid,
-    income_tax_rate_vector,
+    tax_ss,
+    tax_ui,
+    tax_income,
+    transfers_lumpsum,
     period_idx,
 ):
 
@@ -979,6 +2045,7 @@ def _solve_employed(
         policy_consumption_employed_next,
         policy_consumption_unemployed_next,
         separation_rate_vector,
+        tax_income,
         period_idx,
     )
 
@@ -987,7 +2054,10 @@ def _solve_employed(
     assets_off_grid = _invert_bc_employed(
         consumption_employed_off_grid,
         wage_hc_factor_grid,
-        income_tax_rate_vector,
+        tax_ss,
+        tax_ui,
+        tax_income,
+        transfers_lumpsum,
         period_idx,
     )
 
@@ -1000,7 +2070,10 @@ def _solve_employed(
     assets_employed_next = _solve_bc_employed(
         consumption_employed_on_grid,
         wage_hc_factor_grid,
-        income_tax_rate_vector,
+        tax_ss,
+        tax_ui,
+        tax_income,
+        transfers_lumpsum,
         period_idx,
     )
 
@@ -1012,7 +2085,10 @@ def _solve_employed(
         consumption_employed_on_grid,
         assets_employed_next,
         wage_hc_factor_grid,
-        income_tax_rate_vector,
+        tax_ss,
+        tax_ui,
+        tax_income,
+        transfers_lumpsum,
         period_idx,
     )
 
@@ -1043,6 +2119,8 @@ def _solve_unemployed(
     wage_hc_factor_grid,
     wage_loss_factor_vector,
     wage_loss_reference_vector,
+    tax_income,
+    transfers_lumpsum,
     ui_replacement_rate_vector,
     ui_floor,
     ui_cap,
@@ -1059,6 +2137,7 @@ def _solve_unemployed(
         hc_loss_probability,
         wage_loss_factor_vector,
         wage_loss_reference_vector,
+        tax_income,
         period_idx,
     )
 
@@ -1067,6 +2146,8 @@ def _solve_unemployed(
     assets_off_grid = _invert_bc_unemployed(
         consumption_unemployed_off_grid,
         wage_hc_factor_grid,
+        tax_income,
+        transfers_lumpsum,
         ui_replacement_rate_vector,
         ui_floor,
         ui_cap,
@@ -1082,6 +2163,8 @@ def _solve_unemployed(
     assets_unemployed_next = _solve_bc_unemployed(
         consumption_unemployed_on_grid,
         wage_hc_factor_grid,
+        tax_income,
+        transfers_lumpsum,
         ui_replacement_rate_vector,
         ui_floor,
         ui_cap,
@@ -1096,6 +2179,8 @@ def _solve_unemployed(
         consumption_unemployed_on_grid,
         assets_unemployed_next,
         wage_hc_factor_grid,
+        tax_income,
+        transfers_lumpsum,
         ui_replacement_rate_vector,
         ui_floor,
         ui_cap,
@@ -1126,6 +2211,8 @@ def _solve_unemployed_loss(
     wage_hc_factor_grid,
     wage_loss_factor_vector,
     wage_loss_reference_vector,
+    tax_income,
+    transfers_lumpsum,
     ui_replacement_rate_vector,
     ui_floor,
     ui_cap,
@@ -1139,6 +2226,7 @@ def _solve_unemployed_loss(
         policy_consumption_unemployed_loss_next,
         wage_loss_factor_vector,
         wage_loss_reference_vector,
+        tax_income,
         period_idx,
     )
 
@@ -1147,6 +2235,8 @@ def _solve_unemployed_loss(
     assets_off_grid = _invert_bc_unemployed(
         consumption_unemployed_loss_off_grid,
         wage_hc_factor_grid,
+        tax_income,
+        transfers_lumpsum,
         ui_replacement_rate_vector,
         ui_floor,
         ui_cap,
@@ -1163,6 +2253,8 @@ def _solve_unemployed_loss(
     assets_unemployed_loss_next = _solve_bc_unemployed(
         consumption_unemployed_loss_on_grid,
         wage_hc_factor_grid,
+        tax_income,
+        transfers_lumpsum,
         ui_replacement_rate_vector,
         ui_floor,
         ui_cap,
@@ -1177,6 +2269,8 @@ def _solve_unemployed_loss(
         consumption_unemployed_loss_on_grid,
         assets_unemployed_loss_next,
         wage_hc_factor_grid,
+        tax_income,
+        transfers_lumpsum,
         ui_replacement_rate_vector,
         ui_floor,
         ui_cap,
@@ -1208,35 +2302,35 @@ def _solve_searching(
 
     # interpolate value of being employed at depreciated hc levels
     value_employed_loss_now = interpolate_2d_ordered_to_unordered(
-        hc_grid_reduced_e_a,
-        assets_grid_e_a,
+        hc_grid_reduced_h_a,
+        assets_grid_h_a,
         value_employed_now,
         _hc_after_loss_1_agent(
-            hc_grid_reduced_e_a,
+            hc_grid_reduced_h_a,
             wage_loss_factor_vector,
             wage_loss_reference_vector,
             period_idx,
         ),
-        assets_grid_e_a,
+        assets_grid_h_a,
         method=interpolation_method,
     )
 
-    # solve using grid search
-    (policy_effort_searching_now, value_searching_now) = _solve_searching_iter(
-        value_employed_now, value_unemployed_now
-    )
-    (
-        policy_effort_searching_loss_now,
-        value_searching_loss_now,
-    ) = _solve_searching_iter(value_employed_loss_now, value_unemployed_loss_now)
+    # # solve using grid search
+    # (policy_effort_searching_now, value_searching_now) = _solve_searching_iter(
+    #     value_employed_now, value_unemployed_now
+    # )
+    # (
+    #     policy_effort_searching_loss_now,
+    #     value_searching_loss_now,
+    # ) = _solve_searching_iter(value_employed_loss_now, value_unemployed_loss_now)
 
     # solve using FOCs
-    # (
-    #     policy_effort_searching_now, value_searching_now
-    # ) = _solve_searching_foc(value_employed_now, value_unemployed_now)
-    # (
-    #     policy_effort_searching_loss_now, value_searching_loss_now
-    # ) = _solve_searching_foc(value_employed_loss_now, value_unemployed_loss_now)
+    (policy_effort_searching_now, value_searching_now) = _solve_searching_foc(
+        value_employed_now, value_unemployed_now
+    )
+    (policy_effort_searching_loss_now, value_searching_loss_now) = _solve_searching_foc(
+        value_employed_loss_now, value_unemployed_loss_now
+    )
 
     return (
         policy_effort_searching_now,
@@ -1248,8 +2342,8 @@ def _solve_searching(
 
 def _solve_searching_base(value_employed, value_unemployed):
     # initiate objects
-    policy = np.full((hc_grid_reduced_size, assets_grid_size), np.full)
-    value = np.full((hc_grid_reduced_size, assets_grid_size), np.full)
+    policy = np.full((hc_grid_reduced_size, assets_grid_size), np.nan)
+    value = np.full((hc_grid_reduced_size, assets_grid_size), np.nan)
 
     # solve for optimal search effort using grid search method
     for asset_level in range(assets_grid_size):
@@ -1313,7 +2407,8 @@ def _solve_searching_foc(value_employed, value_unemployed):
     ] = search_effort_grid[-1]
 
     # get nearest values on grid
-    policy = on_grid_iter(effort_off_grid)
+    # policy = on_grid_iter(effort_off_grid)
+    policy = effort_off_grid
     value = (
         leisure_utility_interpolated(policy)
         + job_finding_probability(policy) * value_employed
@@ -1581,7 +2676,7 @@ def _simulate_consumption(
 
     # calculate consumption differential to increase asset grid
     consumption_diff = -npf.pmt(
-        interest_rate,
+        (1 - discount_factor) / discount_factor,
         n_periods_retired + (n_periods_working - period_idx + 1),
         assets_max - max(assets_grid),
     )
@@ -1596,8 +2691,8 @@ def _simulate_consumption(
         consumption_unemployed_simulated[
             type_idx, :
         ] = interpolate_2d_ordered_to_unordered(
-            hc_grid_reduced_e_a1,
-            assets_grid_e_a1,
+            hc_grid_reduced_h_a1,
+            assets_grid_h_a1,
             np.append(
                 policy_consumption_unemployed[type_idx, :, :, period_idx],
                 (
@@ -1614,8 +2709,8 @@ def _simulate_consumption(
         consumption_unemployed_loss_simulated[
             type_idx, :
         ] = interpolate_2d_ordered_to_unordered(
-            hc_grid_reduced_e_a1,
-            assets_grid_e_a1,
+            hc_grid_reduced_h_a1,
+            assets_grid_h_a1,
             np.append(
                 policy_consumption_unemployed_loss[type_idx, :, :, period_idx],
                 (
@@ -1632,8 +2727,8 @@ def _simulate_consumption(
         consumption_employed_simulated[
             type_idx, :
         ] = interpolate_2d_ordered_to_unordered(
-            hc_grid_reduced_e_a1,
-            assets_grid_e_a1,
+            hc_grid_reduced_h_a1,
+            assets_grid_h_a1,
             np.append(
                 policy_consumption_employed[type_idx, :, :, period_idx],
                 (
@@ -1666,7 +2761,10 @@ def _simulate_savings(
     consumption_simulated,
     assets_simulated,
     wage_hc_factor_simulated,
-    income_tax_rate_vector,
+    tax_ss,
+    tax_ui,
+    tax_income,
+    transfers_lumpsum,
     ui_replacement_rate_vector,
     ui_floor,
     ui_cap,
@@ -1675,16 +2773,23 @@ def _simulate_savings(
 
     # compute next period asset holdings via bc
     savings_employed_simulated = (
-        assets_simulated * (1 + interest_rate)
-        + np.repeat((1 - income_tax_rate_vector[:, period_idx]), n_simulations).reshape(
+        np.repeat((1 + (1 - tax_income) * interest_rate_raw), n_simulations).reshape(
             (n_types, n_simulations)
         )
+        * assets_simulated
+        + np.repeat(
+            (1 - tax_ss - tax_ui[:, period_idx] - tax_income), n_simulations
+        ).reshape((n_types, n_simulations))
         * wage_level
         * wage_hc_factor_simulated
+        + np.repeat(transfers_lumpsum, n_simulations).reshape((n_types, n_simulations))
         - consumption_simulated
     ) * employed_simulated
     savings_nonemployed_simulated = (
-        assets_simulated * (1 + interest_rate)
+        np.repeat((1 + (1 - tax_income) * interest_rate_raw), n_simulations).reshape(
+            (n_types, n_simulations)
+        )
+        * assets_simulated
         + simulate_ui_benefits(
             wage_level * wage_hc_factor_simulated,
             ui_replacement_rate_vector,
@@ -1692,6 +2797,7 @@ def _simulate_savings(
             ui_cap,
             period_idx,
         )
+        + np.repeat(transfers_lumpsum, n_simulations).reshape((n_types, n_simulations))
         - consumption_simulated
     ) * nonemployed_simulated
 
@@ -1832,7 +2938,15 @@ def _get_statistics_consumption_phase(
     )
     income_simulated = labor_income_simulated + ui_benefits_simulated
 
-    income_median = np.median(income_simulated)
+    income_median = np.median(income_simulated, axis=1)
+
+    assets_over_income_mean = np.full(n_types, np.nan)
+    for type_idx in range(n_types):
+        assets_over_income_mean[type_idx] = np.mean(
+            (assets_simulated[type_idx, :] / labor_income_simulated[type_idx, :])[
+                employed_simulated[type_idx, :]
+            ]
+        )
 
     # UI statistics
     ui_benefits_mean = conditional_mean(
@@ -1842,10 +2956,10 @@ def _get_statistics_consumption_phase(
         ui_benefits_simulated, nonemployed_simulated, axis=1
     ) / conditional_mean(pre_unemployment_wage_simulated, nonemployed_simulated, axis=1)
     ui_share_floor_binding = conditional_mean(
-        (ui_benefits_simulated == ui_floor), nonemployed_simulated, axis=1
+        (ui_benefits_simulated == ui_floor).astype(int), nonemployed_simulated, axis=1
     )
     ui_share_cap_binding = conditional_mean(
-        (ui_benefits_simulated == ui_cap), nonemployed_simulated, axis=1
+        (ui_benefits_simulated == ui_cap).astype(int), nonemployed_simulated, axis=1
     )
 
     # wealth statistics
@@ -1914,6 +3028,7 @@ def _get_statistics_consumption_phase(
         assets_mean,
         assets_nonemployed_mean,
         assets_distribution,
+        assets_over_income_mean,
         distribution_hc_assets_nonemployed,
         log_assets_over_income_nonemployed_mean,
     )
@@ -1923,25 +3038,25 @@ def _solve_and_simulate(controls, calibration):
 
     global assets_grid_size
     global assets_grid
-    global assets_grid_e_a
-    global assets_grid_e_a1
-    global assets_grid_n_e_a
-    global assets_grid_n_e_a1
+    global assets_grid_h_a
+    global assets_grid_h_a1
+    global assets_grid_n_h_a
+    global assets_grid_n_h_a1
     global assets_max
     global assets_min
+    global borrowing_limit_h_a
     global contact_rate
-    global borrowing_limit_e_a
     global discount_factor
     global eps
     global hc_max
     global hc_grid
     global hc_grid_reduced
-    global hc_grid_reduced_e_a
-    global hc_grid_reduced_e_a1
-    global hc_grid_reduced_n_e_a
-    global hc_grid_reduced_n_e_a1
+    global hc_grid_reduced_h_a
+    global hc_grid_reduced_h_a1
+    global hc_grid_reduced_n_h_a
+    global hc_grid_reduced_n_h_a1
     global hc_grid_reduced_size
-    global interest_rate
+    global interest_rate_raw
     global interpolation_method
     global interpolation_method
     global job_finding_probability_grid
@@ -1972,28 +3087,25 @@ def _solve_and_simulate(controls, calibration):
     tolerance_solve = controls["tolerance_solve"]
 
     # load calibration
+
+    # general parameters
     assets_grid = np.array(calibration["assets_grid"])
     assets_max = calibration["assets_max"]
     assets_min = calibration["assets_min"]
     consumption_min = calibration["consumption_min"]
-    consumption_tax_rate_init = np.array(
-        calibration["consumption_tax_rate_init"][interpolation_method]
-    )
     contact_rate = calibration["contact_rate"]
     discount_factor = calibration["discount_factor"]
+    equilibrium_condition = calibration["equilibrium_condition"]
     hc_grid_reduced = np.array(calibration["hc_grid_reduced"])
     hc_loss_probability = np.array(calibration["hc_loss_probability"])
-    income_tax_rate_init = np.array(
-        calibration["income_tax_rate_init"][interpolation_method]
-    )
-    instrument = calibration["instrument"]
     leisure_utility = np.array(calibration["leisure_utility"])
     leisure_utility_dx = np.array(calibration["leisure_utility_dx"])
     leisure_utility_dxdx = np.array(calibration["leisure_utility_dxdx"])
     n_periods_retired = calibration["n_periods_retired"]
     n_periods_working = calibration["n_periods_working"]
     n_types = calibration["n_types"]
-    pension_benefits = np.array(calibration["pension_benefits"])
+    transfers_pensions = np.array(calibration["transfers_pensions_init"])
+    transfers_lumpsum = np.array(calibration["transfers_lumpsum_init"])
     risk_aversion_coefficient = calibration["risk_aversion_coefficient"]
     search_effort_grid_size = calibration["search_effort_grid_size"]
     search_effort_max = calibration["search_effort_max"]
@@ -2008,12 +3120,23 @@ def _solve_and_simulate(controls, calibration):
     wage_loss_factor_vector = np.array(calibration["wage_loss_factor_vector"])
     wage_loss_reference_vector = np.array(calibration["wage_loss_reference_vector"])
 
+    # exogenous taxes
+    tax_income = np.array(calibration["tax_income"])
+    tax_ss = np.array(calibration["tax_ss"])
+
+    # initial values for endogenous taxes
+    tax_consumption_init = np.array(
+        calibration["tax_consumption_init"][interpolation_method]
+    )
+    tax_ui_init = np.array(calibration["tax_ui_init"][interpolation_method])
+    instrument = calibration["instrument"]
+
     # calculate derived parameters
     assets_grid_size = len(assets_grid)
     hc_grid_reduced_size = len(hc_grid_reduced)
     hc_grid = np.arange(n_periods_working + 1)
     hc_max = np.amax(hc_grid)
-    interest_rate = (1 - discount_factor) / discount_factor
+    interest_rate_raw = (1 - discount_factor) / discount_factor
     leisure_grid = np.linspace(
         search_effort_min, search_effort_max, len(leisure_utility)
     )
@@ -2024,40 +3147,40 @@ def _solve_and_simulate(controls, calibration):
     leisure_utility_dx_max = leisure_utility_dx_interpolated(search_effort_max)
     leisure_utility_dx_min = leisure_utility_dx_interpolated(search_effort_min)
     job_finding_probability_grid = job_finding_probability(search_effort_grid)
-    borrowing_limit_e_a = np.full((hc_grid_reduced_size, assets_grid_size), assets_min)
+    borrowing_limit_h_a = np.full((hc_grid_reduced_size, assets_grid_size), assets_min)
     n_types = separation_rate_vector.shape[0]
 
     # generate grids
-    assets_grid_e_a = (
+    assets_grid_h_a = (
         np.repeat(assets_grid, hc_grid_reduced_size)
         .reshape(assets_grid_size, hc_grid_reduced_size)
         .T
     )
-    assets_grid_e_a1 = np.append(
-        assets_grid_e_a, np.full((hc_grid_reduced_size, 1), assets_max), axis=1
+    assets_grid_h_a1 = np.append(
+        assets_grid_h_a, np.full((hc_grid_reduced_size, 1), assets_max), axis=1
     )
-    assets_grid_n_e_a = np.tile(assets_grid, n_types * hc_grid_reduced_size).reshape(
+    assets_grid_n_h_a = np.tile(assets_grid, n_types * hc_grid_reduced_size).reshape(
         (n_types, hc_grid_reduced_size, assets_grid_size)
     )
-    assets_grid_n_e_a1 = np.append(
-        assets_grid_n_e_a,
+    assets_grid_n_h_a1 = np.append(
+        assets_grid_n_h_a,
         np.full((n_types, hc_grid_reduced_size, 1), assets_max),
         axis=2,
     )
 
-    hc_grid_reduced_e_a = np.repeat(hc_grid_reduced, assets_grid_size).reshape(
+    hc_grid_reduced_h_a = np.repeat(hc_grid_reduced, assets_grid_size).reshape(
         hc_grid_reduced_size, assets_grid_size
     )
-    hc_grid_reduced_e_a1 = np.append(
-        hc_grid_reduced_e_a, hc_grid_reduced[..., np.newaxis], axis=1
+    hc_grid_reduced_h_a1 = np.append(
+        hc_grid_reduced_h_a, hc_grid_reduced[..., np.newaxis], axis=1
     )
-    hc_grid_reduced_n_e_a = np.tile(
+    hc_grid_reduced_n_h_a = np.tile(
         hc_grid_reduced, n_types * assets_grid_size
     ).reshape((n_types, assets_grid_size, hc_grid_reduced_size))
-    hc_grid_reduced_n_e_a = np.moveaxis(hc_grid_reduced_n_e_a, 2, 1)
+    hc_grid_reduced_n_h_a = np.moveaxis(hc_grid_reduced_n_h_a, 2, 1)
 
-    hc_grid_reduced_n_e_a1 = np.append(
-        hc_grid_reduced_n_e_a,
+    hc_grid_reduced_n_h_a1 = np.append(
+        hc_grid_reduced_n_h_a,
         np.tile(hc_grid_reduced, n_types).reshape((n_types, hc_grid_reduced_size, 1)),
         axis=2,
     )
@@ -2069,28 +3192,62 @@ def _solve_and_simulate(controls, calibration):
 
     # check instrument
     if instrument not in [
-        "income_tax_rate",
-        "income_tax_shift",
-        "consumption_tax_rate",
+        "tax_ui_rate",
+        "tax_ui_shift",
+        "tax_consumption",
     ]:
         raise ValueError(
             "error in equilibrium instrument; choose one of "
-            "['income_tax_rate', 'income_tax_shift', 'consumption_tax_rate']"
+            "['tax_ui_rate', 'tax_ui_shift', 'tax_consumption']"
         )
 
     # set initial values for policy rates
-    consumption_tax_rate = consumption_tax_rate_init
+    tax_consumption = tax_consumption_init
 
-    if income_tax_rate_init.shape == (n_types,):
-        income_tax_rate = income_tax_rate_init
-        income_tax_rate_vector = np.repeat(income_tax_rate, n_periods_working).reshape(
+    # check if initial instrument rate rate is consistent with equilibrium condition
+    if equilibrium_condition == "combined":
+        if instrument == "tax_ui_rate":
+            if not np.all(tax_income == tax_income[0]):
+                raise ValueError(
+                    "error in input variable tax_ui;"
+                    " with combined budget, income tax rate required to be equal across types"
+                )
+            else:
+                pass
+        elif instrument == "tax_ui_shift":
+            if not np.all(tax_income == tax_income[0]):
+                raise ValueError(
+                    "error in input variable tax_ui;"
+                    " with combined budget, income tax rate required"
+                    " to be equal across types"
+                )
+            else:
+                pass
+        elif instrument == "tax_consumption":
+            if not np.all(tax_consumption_init == tax_consumption_init[0]):
+                raise ValueError(
+                    "error in input variable tax_consumption_init;"
+                    " with combined budget, consumption tax rate required"
+                    " to be equal across types"
+                )
+            else:
+                pass
+        else:
+            pass
+    else:
+        pass
+
+    # construct ui tax rate vector from initial values
+    if tax_ui_init.shape == (n_types,):
+        tax_ui = tax_ui_init
+        tax_ui_vector = np.repeat(tax_ui, n_periods_working).reshape(
             (n_types, n_periods_working)
         )
-    elif income_tax_rate_init.shape == (n_types, n_periods_working):
-        income_tax_rate_vector = income_tax_rate_init
-        income_tax_shift = 0.0
+    elif tax_ui_init.shape == (n_types, n_periods_working):
+        tax_ui_vector = tax_ui_init
+        tax_ui_shift = 0.0
     else:
-        raise ValueError("error in input variable income_tax_rate_init")
+        raise ValueError("error in input variable tax_ui")
 
     if ui_cap == "None":
         ui_cap = np.Inf
@@ -2099,23 +3256,22 @@ def _solve_and_simulate(controls, calibration):
 
     # initiate objects for iteration
     instrument_hist = []
-    error = 100
     n_iter = 0
 
     #######################################################
     # SOLUTION
 
-    while error > tolerance_solve and n_iter <= n_iter_solve_max:
+    while n_iter <= n_iter_solve_max:
 
         # Initialize objects
 
         # store current instrument rate
-        if instrument == "income_tax_rate":
-            instrument_hist += [copy.deepcopy(income_tax_rate)]
-        elif instrument == "income_tax_shift":
-            instrument_hist += [copy.deepcopy(income_tax_shift)]
-        elif instrument == "consumption_tax_rate":
-            instrument_hist += [copy.deepcopy(consumption_tax_rate)]
+        if instrument == "tax_ui_rate":
+            instrument_hist += [copy.deepcopy(tax_ui)]
+        elif instrument == "tax_ui_shift":
+            instrument_hist += [copy.deepcopy(tax_ui_shift)]
+        elif instrument == "tax_consumption":
+            instrument_hist += [copy.deepcopy(tax_consumption)]
 
         # policy functions [type x hc x assets x age (working + first retirement period)]
         policy_consumption_unemployed = np.full(
@@ -2211,8 +3367,8 @@ def _solve_and_simulate(controls, calibration):
             np.nan,
         )
 
-        # cost functions [type x hc x assets x age]
-        cost_unemployed = np.full(
+        # government program cost and revenue functions [type x hc x assets x age]
+        cost_ui_employed = np.full(
             (
                 n_types,
                 hc_grid_reduced_size,
@@ -2221,7 +3377,7 @@ def _solve_and_simulate(controls, calibration):
             ),
             np.nan,
         )
-        cost_unemployed_loss = np.full(
+        cost_ui_unemployed = np.full(
             (
                 n_types,
                 hc_grid_reduced_size,
@@ -2230,7 +3386,90 @@ def _solve_and_simulate(controls, calibration):
             ),
             np.nan,
         )
-        cost_employed = np.full(
+        cost_ui_unemployed_loss = np.full(
+            (
+                n_types,
+                hc_grid_reduced_size,
+                assets_grid_size,
+                n_periods_working + 1,
+            ),
+            np.nan,
+        )
+
+        revenue_ss_employed = np.full(
+            (
+                n_types,
+                hc_grid_reduced_size,
+                assets_grid_size,
+                n_periods_working + 1,
+            ),
+            np.nan,
+        )
+        revenue_ss_unemployed = np.full(
+            (
+                n_types,
+                hc_grid_reduced_size,
+                assets_grid_size,
+                n_periods_working + 1,
+            ),
+            np.nan,
+        )
+        revenue_ss_unemployed_loss = np.full(
+            (
+                n_types,
+                hc_grid_reduced_size,
+                assets_grid_size,
+                n_periods_working + 1,
+            ),
+            np.nan,
+        )
+        revenue_ui_employed = np.full(
+            (
+                n_types,
+                hc_grid_reduced_size,
+                assets_grid_size,
+                n_periods_working + 1,
+            ),
+            np.nan,
+        )
+        revenue_ui_unemployed = np.full(
+            (
+                n_types,
+                hc_grid_reduced_size,
+                assets_grid_size,
+                n_periods_working + 1,
+            ),
+            np.nan,
+        )
+        revenue_ui_unemployed_loss = np.full(
+            (
+                n_types,
+                hc_grid_reduced_size,
+                assets_grid_size,
+                n_periods_working + 1,
+            ),
+            np.nan,
+        )
+
+        revenue_lumpsum_employed = np.full(
+            (
+                n_types,
+                hc_grid_reduced_size,
+                assets_grid_size,
+                n_periods_working + 1,
+            ),
+            np.nan,
+        )
+        revenue_lumpsum_unemployed = np.full(
+            (
+                n_types,
+                hc_grid_reduced_size,
+                assets_grid_size,
+                n_periods_working + 1,
+            ),
+            np.nan,
+        )
+        revenue_lumpsum_unemployed_loss = np.full(
             (
                 n_types,
                 hc_grid_reduced_size,
@@ -2244,20 +3483,26 @@ def _solve_and_simulate(controls, calibration):
 
         # retirement consumption levels [type x hc x assets]
         # (annuity income from assets + pension benefits - consumption tax)
-        annuity_income = (
-            assets_grid * interest_rate / (1 - discount_factor ** n_periods_retired)
+        annuity_factor = (
+            (1 - tax_income)
+            * interest_rate_raw
+            * (1 + (1 - tax_income) * interest_rate_raw) ** n_periods_retired
+            / ((1 + (1 - tax_income) * interest_rate_raw) ** n_periods_retired - 1)
         )
-        annuity_income = np.tile(
-            annuity_income, n_types * hc_grid_reduced_size
+        annuity_income = assets_grid_n_h_a * np.repeat(
+            annuity_factor, (hc_grid_reduced_size * assets_grid_size)
         ).reshape((n_types, hc_grid_reduced_size, assets_grid_size))
         pension_income = np.repeat(
-            pension_benefits, (hc_grid_reduced_size * assets_grid_size)
+            transfers_pensions, (hc_grid_reduced_size * assets_grid_size)
+        ).reshape((n_types, hc_grid_reduced_size, assets_grid_size))
+        transfer_income = np.repeat(
+            transfers_lumpsum, (hc_grid_reduced_size * assets_grid_size)
         ).reshape((n_types, hc_grid_reduced_size, assets_grid_size))
 
         policy_consumption_retired = np.repeat(
-            1 / (1 + consumption_tax_rate), (hc_grid_reduced_size * assets_grid_size)
+            1 / (1 + tax_consumption), (hc_grid_reduced_size * assets_grid_size)
         ).reshape((n_types, hc_grid_reduced_size, assets_grid_size)) * (
-            annuity_income + pension_income
+            annuity_income + pension_income + transfer_income
         )
 
         policy_consumption_retired = np.maximum(
@@ -2271,20 +3516,41 @@ def _solve_and_simulate(controls, calibration):
             * consumption_utility(policy_consumption_retired)
         )
 
-        # cost to the government of paying pension benefits throughout retirement
-        # by hc level (reduced) [type x hc x assets]
-        cost_retired = (1 - discount_factor ** n_periods_retired) / (
-            1 - discount_factor
-        ) / np.repeat(
-            (1 + consumption_tax_rate), (hc_grid_reduced_size * assets_grid_size)
-        ).reshape(
-            (n_types, hc_grid_reduced_size, assets_grid_size)
-        ) * pension_income - 1 / discount_factor * np.repeat(
-            consumption_tax_rate / (1 + consumption_tax_rate),
-            (hc_grid_reduced_size * assets_grid_size),
-        ).reshape(
-            (n_types, hc_grid_reduced_size, assets_grid_size)
-        ) * assets_grid_n_e_a
+        # revenue from income tax during retirement
+        revenue_factor_lumpsum_retirement = (
+            (1 - tax_income)
+            * (1 + (1 - tax_income) * interest_rate_raw) ** n_periods_retired
+            - (
+                (
+                    1
+                    - tax_income
+                    * (1 + (1 - tax_income) * interest_rate_raw) ** n_periods_retired
+                )
+                * (1 + interest_rate_raw) ** n_periods_retired
+            )
+        ) / (
+            ((1 + (1 - tax_income) * interest_rate_raw) ** n_periods_retired - 1)
+            * (1 + interest_rate_raw) ** (n_periods_retired - 1)
+        )
+
+        revenue_lumpsum_retirement = assets_grid_n_h_a * np.repeat(
+            revenue_factor_lumpsum_retirement, (hc_grid_reduced_size * assets_grid_size)
+        ).reshape((n_types, hc_grid_reduced_size, assets_grid_size))
+
+        # # cost to the government of paying pension benefits throughout retirement
+        # # by hc level (reduced) [type x hc x assets]
+        # cost_retired = (1 - discount_factor ** n_periods_retired) / (
+        #     1 - discount_factor
+        # ) / np.repeat(
+        #     (1 + tax_consumption), (hc_grid_reduced_size * assets_grid_size)
+        # ).reshape(
+        #     (n_types, hc_grid_reduced_size, assets_grid_size)
+        # ) * pension_income - 1 / discount_factor * np.repeat(
+        #     tax_consumption / (1 + tax_consumption),
+        #     (hc_grid_reduced_size * assets_grid_size),
+        # ).reshape(
+        #     (n_types, hc_grid_reduced_size, assets_grid_size)
+        # ) * assets_grid_n_h_a
 
         # Starting in the last period of the working life
         period_idx = n_periods_working - 1  # zero-based indexing
@@ -2296,16 +3562,16 @@ def _solve_and_simulate(controls, calibration):
         policy_consumption_unemployed_loss[
             :, :, :, -1
         ] = interpolate_n_h_a_ordered_to_unordered(
-            hc_grid_reduced_n_e_a,
-            assets_grid_n_e_a,
+            hc_grid_reduced_n_h_a,
+            assets_grid_n_h_a,
             policy_consumption_retired,
             _hc_after_loss_n_agents(
-                hc_grid_reduced_n_e_a,
+                hc_grid_reduced_n_h_a,
                 wage_loss_factor_vector,
                 wage_loss_reference_vector,
                 period_idx + 1,
             ),
-            assets_grid_n_e_a,
+            assets_grid_n_h_a,
             method=interpolation_method,
         )
 
@@ -2318,48 +3584,53 @@ def _solve_and_simulate(controls, calibration):
         value_employed[:, :, :, -1] = value_retired
         value_unemployed[:, :, :, -1] = value_retired
         value_unemployed_loss[:, :, :, -1] = interpolate_n_h_a_ordered_to_unordered(
-            hc_grid_reduced_n_e_a,
-            assets_grid_n_e_a,
+            hc_grid_reduced_n_h_a,
+            assets_grid_n_h_a,
             value_retired,
             _hc_after_loss_n_agents(
-                hc_grid_reduced_n_e_a,
+                hc_grid_reduced_n_h_a,
                 wage_loss_factor_vector,
                 wage_loss_reference_vector,
                 period_idx + 1,
             ),
-            assets_grid_n_e_a,
+            assets_grid_n_h_a,
             method=interpolation_method,
         )
         value_searching[:, :, :, -1] = value_retired
         value_searching_loss[:, :, :, -1] = interpolate_n_h_a_ordered_to_unordered(
-            hc_grid_reduced_n_e_a,
-            assets_grid_n_e_a,
+            hc_grid_reduced_n_h_a,
+            assets_grid_n_h_a,
             value_retired,
             _hc_after_loss_n_agents(
-                hc_grid_reduced_n_e_a,
+                hc_grid_reduced_n_h_a,
                 wage_loss_factor_vector,
                 wage_loss_reference_vector,
                 period_idx + 1,
             ),
-            assets_grid_n_e_a,
+            assets_grid_n_h_a,
             method=interpolation_method,
         )
 
-        cost_employed[:, :, :, -1] = cost_retired
-        cost_unemployed[:, :, :, -1] = cost_retired
-        cost_unemployed_loss[:, :, :, -1] = interpolate_n_h_a_ordered_to_unordered(
-            hc_grid_reduced_n_e_a,
-            assets_grid_n_e_a,
-            cost_retired,
-            _hc_after_loss_n_agents(
-                hc_grid_reduced_n_e_a,
-                wage_loss_factor_vector,
-                wage_loss_reference_vector,
-                period_idx + 1,
-            ),
-            assets_grid_n_e_a,
-            method=interpolation_method,
-        )
+        # government cost functions
+        cost_ui_employed[:, :, :, -1] = 0.0
+        cost_ui_unemployed[:, :, :, -1] = 0.0
+        cost_ui_unemployed_loss[:, :, :, -1] = 0.0
+        # cost of pensions and transfers do not need to be computed
+        # recursively (constant streams), but PVs of cost of pensions
+        # and transfers are computed at the end of the solution
+
+        # government revenue functions
+        revenue_ss_employed[:, :, :, -1] = 0.0
+        revenue_ss_unemployed[:, :, :, -1] = 0.0
+        revenue_ss_unemployed_loss[:, :, :, -1] = 0.0
+
+        revenue_ui_employed[:, :, :, -1] = 0.0
+        revenue_ui_unemployed[:, :, :, -1] = 0.0
+        revenue_ui_unemployed_loss[:, :, :, -1] = 0.0
+
+        revenue_lumpsum_employed[:, :, :, -1] = revenue_lumpsum_retirement
+        revenue_lumpsum_unemployed[:, :, :, -1] = revenue_lumpsum_retirement
+        revenue_lumpsum_unemployed_loss[:, :, :, -1] = revenue_lumpsum_retirement
 
         # WORKING PERIOD (solving backwards for each t):
         while period_idx >= 0:
@@ -2388,9 +3659,41 @@ def _solve_and_simulate(controls, calibration):
                     type_idx, :, :, period_idx + 1
                 ]
 
-                cost_employed_next = cost_employed[type_idx, :, :, period_idx + 1]
-                cost_unemployed_next = cost_unemployed[type_idx, :, :, period_idx + 1]
-                cost_unemployed_loss_next = cost_unemployed_loss[
+                cost_ui_employed_next = cost_ui_employed[type_idx, :, :, period_idx + 1]
+                cost_ui_unemployed_next = cost_ui_unemployed[
+                    type_idx, :, :, period_idx + 1
+                ]
+                cost_ui_unemployed_loss_next = cost_ui_unemployed_loss[
+                    type_idx, :, :, period_idx + 1
+                ]
+
+                revenue_ss_employed_next = revenue_ss_employed[
+                    type_idx, :, :, period_idx + 1
+                ]
+                revenue_ss_unemployed_next = revenue_ss_unemployed[
+                    type_idx, :, :, period_idx + 1
+                ]
+                revenue_ss_unemployed_loss_next = revenue_ss_unemployed_loss[
+                    type_idx, :, :, period_idx + 1
+                ]
+
+                revenue_ui_employed_next = revenue_ui_employed[
+                    type_idx, :, :, period_idx + 1
+                ]
+                revenue_ui_unemployed_next = revenue_ui_unemployed[
+                    type_idx, :, :, period_idx + 1
+                ]
+                revenue_ui_unemployed_loss_next = revenue_ui_unemployed_loss[
+                    type_idx, :, :, period_idx + 1
+                ]
+
+                revenue_lumpsum_employed_next = revenue_lumpsum_employed[
+                    type_idx, :, :, period_idx + 1
+                ]
+                revenue_lumpsum_unemployed_next = revenue_lumpsum_unemployed[
+                    type_idx, :, :, period_idx + 1
+                ]
+                revenue_lumpsum_unemployed_loss_next = revenue_lumpsum_unemployed_loss[
                     type_idx, :, :, period_idx + 1
                 ]
 
@@ -2406,9 +3709,18 @@ def _solve_and_simulate(controls, calibration):
                     value_unemployed_loss_now,
                     value_searching_now,
                     value_searching_loss_now,
-                    cost_employed_now,
-                    cost_unemployed_now,
-                    cost_unemployed_loss_now,
+                    cost_ui_employed_now,
+                    cost_ui_unemployed_now,
+                    cost_ui_unemployed_loss_now,
+                    revenue_ss_employed_now,
+                    revenue_ss_unemployed_now,
+                    revenue_ss_unemployed_loss_now,
+                    revenue_ui_employed_now,
+                    revenue_ui_unemployed_now,
+                    revenue_ui_unemployed_loss_now,
+                    revenue_lumpsum_employed_now,
+                    revenue_lumpsum_unemployed_now,
+                    revenue_lumpsum_unemployed_loss_now,
                 ) = _solve_one_period(
                     policy_consumption_employed_next,
                     policy_consumption_unemployed_next,
@@ -2418,17 +3730,28 @@ def _solve_and_simulate(controls, calibration):
                     value_employed_next,
                     value_searching_next,
                     value_searching_loss_next,
-                    cost_employed_next,
-                    cost_unemployed_next,
-                    cost_unemployed_loss_next,
+                    cost_ui_employed_next,
+                    cost_ui_unemployed_next,
+                    cost_ui_unemployed_loss_next,
                     hc_loss_probability[type_idx, ...],
+                    revenue_ss_employed_next,
+                    revenue_ss_unemployed_next,
+                    revenue_ss_unemployed_loss_next,
+                    revenue_ui_employed_next,
+                    revenue_ui_unemployed_next,
+                    revenue_ui_unemployed_loss_next,
+                    revenue_lumpsum_employed_next,
+                    revenue_lumpsum_unemployed_next,
+                    revenue_lumpsum_unemployed_loss_next,
                     separation_rate_vector[type_idx, ...],
                     wage_hc_factor_grid[type_idx, ...],
                     wage_hc_factor_vector[type_idx, ...],
                     wage_loss_factor_vector[type_idx, ...],
                     wage_loss_reference_vector[type_idx, ...],
-                    consumption_tax_rate[type_idx, ...],
-                    income_tax_rate_vector[type_idx, ...],
+                    tax_ss[type_idx, ...],
+                    tax_ui_vector[type_idx, ...],
+                    tax_income[type_idx, ...],
+                    transfers_lumpsum[type_idx, ...],
                     ui_replacement_rate_vector[type_idx, ...],
                     ui_floor,
                     ui_cap,
@@ -2462,11 +3785,41 @@ def _solve_and_simulate(controls, calibration):
                     type_idx, :, :, period_idx
                 ] = value_searching_loss_now
 
-                cost_employed[type_idx, :, :, period_idx] = cost_employed_now
-                cost_unemployed[type_idx, :, :, period_idx] = cost_unemployed_now
-                cost_unemployed_loss[
+                cost_ui_employed[type_idx, :, :, period_idx] = cost_ui_employed_now
+                cost_ui_unemployed[type_idx, :, :, period_idx] = cost_ui_unemployed_now
+                cost_ui_unemployed_loss[
                     type_idx, :, :, period_idx
-                ] = cost_unemployed_loss_now
+                ] = cost_ui_unemployed_loss_now
+
+                revenue_ss_employed[
+                    type_idx, :, :, period_idx
+                ] = revenue_ss_employed_now
+                revenue_ss_unemployed[
+                    type_idx, :, :, period_idx
+                ] = revenue_ss_unemployed_now
+                revenue_ss_unemployed_loss[
+                    type_idx, :, :, period_idx
+                ] = revenue_ss_unemployed_loss_now
+
+                revenue_ui_employed[
+                    type_idx, :, :, period_idx
+                ] = revenue_ui_employed_now
+                revenue_ui_unemployed[
+                    type_idx, :, :, period_idx
+                ] = revenue_ui_unemployed_now
+                revenue_ui_unemployed_loss[
+                    type_idx, :, :, period_idx
+                ] = revenue_ui_unemployed_loss_now
+
+                revenue_lumpsum_employed[
+                    type_idx, :, :, period_idx
+                ] = revenue_lumpsum_employed_now
+                revenue_lumpsum_unemployed[
+                    type_idx, :, :, period_idx
+                ] = revenue_lumpsum_unemployed_now
+                revenue_lumpsum_unemployed_loss[
+                    type_idx, :, :, period_idx
+                ] = revenue_lumpsum_unemployed_loss_now
 
             # initiate next iteration
             period_idx -= 1
@@ -2474,7 +3827,10 @@ def _solve_and_simulate(controls, calibration):
         # obtain aggregate measures
 
         pv_utility_computed = np.full(n_types, np.nan)
-        pv_cost_computed = np.full(n_types, np.nan)
+        pv_cost_ui_computed = np.full(n_types, np.nan)
+        pv_revenue_ss_computed = np.full(n_types, np.nan)
+        pv_revenue_ui_computed = np.full(n_types, np.nan)
+        pv_revenue_lumpsum_computed = np.full(n_types, np.nan)
         for type_idx in range(n_types):
             # pv of utility of searcher with age=0, assets=0 and hc=0
             pv_utility_computed[type_idx] = interpolate_1d(
@@ -2491,69 +3847,280 @@ def _solve_and_simulate(controls, calibration):
                 0,
                 method=interpolation_method,
             )
-            pv_cost_computed[type_idx] = (1 - search_effort_at_entry) * interpolate_1d(
+            pv_cost_ui_computed[type_idx] = (
+                1 - search_effort_at_entry
+            ) * interpolate_1d(
                 assets_grid,
-                cost_unemployed[type_idx, 0, :, 0],
+                cost_ui_unemployed[type_idx, 0, :, 0],
                 0,
                 method=interpolation_method,
             ) + search_effort_at_entry * interpolate_1d(
                 assets_grid,
-                cost_employed[type_idx, 0, :, 0],
+                cost_ui_employed[type_idx, 0, :, 0],
+                0,
+                method=interpolation_method,
+            )
+            pv_revenue_ss_computed[type_idx] = (
+                1 - search_effort_at_entry
+            ) * interpolate_1d(
+                assets_grid,
+                revenue_ss_unemployed[type_idx, 0, :, 0],
+                0,
+                method=interpolation_method,
+            ) + search_effort_at_entry * interpolate_1d(
+                assets_grid,
+                revenue_ss_employed[type_idx, 0, :, 0],
+                0,
+                method=interpolation_method,
+            )
+            pv_revenue_ui_computed[type_idx] = (
+                1 - search_effort_at_entry
+            ) * interpolate_1d(
+                assets_grid,
+                revenue_ui_unemployed[type_idx, 0, :, 0],
+                0,
+                method=interpolation_method,
+            ) + search_effort_at_entry * interpolate_1d(
+                assets_grid,
+                revenue_ui_employed[type_idx, 0, :, 0],
+                0,
+                method=interpolation_method,
+            )
+            pv_revenue_lumpsum_computed[type_idx] = (
+                1 - search_effort_at_entry
+            ) * interpolate_1d(
+                assets_grid,
+                revenue_lumpsum_unemployed[type_idx, 0, :, 0],
+                0,
+                method=interpolation_method,
+            ) + search_effort_at_entry * interpolate_1d(
+                assets_grid,
+                revenue_lumpsum_employed[type_idx, 0, :, 0],
                 0,
                 method=interpolation_method,
             )
 
+        # cost functions
+
+        # cost to the government of paying pension benefits throughout retirement
+        # by hc level (reduced) [type x hc x assets]
+        pv_cost_factor_ss = ((1 + interest_rate_raw) ** n_periods_retired - 1) / (
+            interest_rate_raw
+            * (1 + interest_rate_raw) ** (n_periods_working + n_periods_retired)
+        )
+        pv_cost_ss_computed = transfers_pensions * pv_cost_factor_ss
+
+        # cost to the government of paying lump-sum transfers throughout retirement
+        # by hc level (reduced) [type x hc x assets]
+        pv_cost_factor_lumpsum = (
+            (1 + interest_rate_raw) ** (n_periods_working + n_periods_retired + 1) - 1
+        ) / (
+            interest_rate_raw
+            * (1 + interest_rate_raw) ** (n_periods_working + n_periods_retired)
+        )
+        pv_cost_lumpsum_computed = transfers_lumpsum * pv_cost_factor_lumpsum
+
+        # computed balance for government programs
+        pv_balance_ss_computed = pv_revenue_ss_computed - pv_cost_ss_computed
+        pv_balance_ui_computed = pv_revenue_ui_computed - pv_cost_ui_computed
+        pv_balance_lumpsum_computed = (
+            pv_revenue_lumpsum_computed - pv_cost_lumpsum_computed
+        )
+
         # correct for unbalanced government budget
-        pv_utility_corrected = pv_utility_computed - 0.55 * pv_cost_computed
+        pv_utility_corrected = pv_utility_computed + 0.55 * pv_balance_ui_computed
 
         # average over types
-        average_pv_utility_computed = np.average(
-            pv_utility_computed, weights=type_weights
+        average_pv_cost_ui_computed = (
+            np.average(pv_cost_ui_computed, weights=type_weights)
+        ).reshape(
+            1,
         )
-        average_pv_cost_computed = np.average(pv_cost_computed, weights=type_weights)
-        average_pv_utility_computed_corrected = np.average(
-            pv_utility_corrected, weights=type_weights
+        average_pv_revenue_ss_computed = (
+            np.average(pv_revenue_ss_computed, weights=type_weights)
+        ).reshape(
+            1,
         )
+        # average_pv_revenue_ui_computed = (
+        #     np.average(pv_revenue_ui_computed, weights=type_weights)
+        # ).reshape(1,)
+        average_pv_revenue_lumpsum_computed = (
+            np.average(pv_revenue_lumpsum_computed, weights=type_weights)
+        ).reshape(
+            1,
+        )
+        average_pv_utility_computed = (
+            np.average(pv_utility_computed, weights=type_weights)
+        ).reshape(
+            1,
+        )
+        average_pv_balance_ss_computed = (
+            np.average(pv_balance_ss_computed, weights=type_weights)
+        ).reshape(
+            1,
+        )
+        average_pv_balance_ui_computed = (
+            np.average(pv_balance_ui_computed, weights=type_weights)
+        ).reshape(
+            1,
+        )
+        average_pv_balance_lumpsum_computed = (
+            np.average(pv_balance_lumpsum_computed, weights=type_weights)
+        ).reshape(
+            1,
+        )
+        average_pv_utility_computed_corrected = (
+            np.average(pv_utility_corrected, weights=type_weights)
+        ).reshape(
+            1,
+        )
+
+        # find quantities for government budget constraint
+        if equilibrium_condition == "combined":
+            pv_ss_net = average_pv_balance_ss_computed
+            pv_ui_net = average_pv_balance_ui_computed
+            pv_lumpsum_net = average_pv_balance_lumpsum_computed
+            utility_at_entry = average_pv_utility_computed
+            utility_at_entry_corrected = average_pv_utility_computed_corrected
+            instrument_init = (
+                np.average(instrument_hist[0], weights=type_weights)
+            ).reshape(
+                1,
+            )
+            instrument_now = (
+                np.average(instrument_hist[-1], weights=type_weights)
+            ).reshape(
+                1,
+            )
+        elif equilibrium_condition == "individual":
+            pv_ss_net = pv_balance_ss_computed
+            pv_ui_net = pv_balance_ui_computed
+            pv_lumpsum_net = pv_balance_lumpsum_computed
+            utility_at_entry = pv_utility_computed
+            utility_at_entry_corrected = pv_utility_corrected
+            instrument_init = instrument_hist[0]
+            instrument_now = instrument_hist[-1]
+        else:
+            raise ValueError(
+                "error in equilibrium condition; choose one of "
+                "['combined', 'individual']"
+            )
 
         # print output summary
         if show_summary:
-            summary_solve = np.array(
-                (
-                    ("n_iter", n_iter),
-                    ("cost at entry", average_pv_cost_computed),
-                    ("value at entry", np.round(average_pv_utility_computed, 5)),
-                    (
-                        "welfare corrected",
-                        np.round(average_pv_utility_computed_corrected, 5),
-                    ),
-                    (f"initial {instrument}", np.round(instrument_hist[0], 5)),
-                    (f"current {instrument}", np.round(instrument_hist[-1], 5)),
+            print(
+                "\n###############################################"
+                "###############################################\n"
+                "MODEL SOLUTION: \n"
+                "    iteration" + " " * (81 - len(f"{n_iter:4d}")) + f"{n_iter:4d}\n"
+                "    equilibrium condition"
+                + " " * (69 - len(f"{equilibrium_condition}"))
+                + f"{equilibrium_condition}\n"
+                "    balance unemployment insurance (pv)"
+                + " "
+                * (55 - len("[" + ", ".join(f"{i:1.7f}" for i in pv_ui_net) + "]"))
+                + "["
+                + ", ".join(f"{i:1.7f}" for i in pv_ui_net)
+                + "]\n"
+                "    balance social security (pv)"
+                + " "
+                * (62 - len("[" + ", ".join(f"{i:1.7f}" for i in pv_ss_net) + "]"))
+                + "["
+                + ", ".join("{i:1.7f}" for i in pv_ss_net)
+                + "]\n"
+                "    balance general tax and transfers (pv)"
+                + " "
+                * (52 - len("[" + ", ".join(f"{i:1.7f}" for i in pv_lumpsum_net) + "]"))
+                + "["
+                + ", ".join(f"{i:1.7f}" for i in pv_lumpsum_net)
+                + "]\n"
+                "    welfare (pv utility at entry)"
+                + " "
+                * (
+                    61
+                    - len("[" + ", ".join(f"{i:1.5f}" for i in utility_at_entry) + "]")
                 )
+                + "["
+                + ", ".join(f"{i:1.5f}" for i in utility_at_entry)
+                + "]\n"
+                "    welfare corrected"
+                + " "
+                * (
+                    73
+                    - len(
+                        "["
+                        + ", ".join(f"{i:1.5f}" for i in utility_at_entry_corrected)
+                        + "]"
+                    )
+                )
+                + "["
+                + ", ".join(f"{i:1.5f}" for i in utility_at_entry_corrected)
+                + "]\n"
+                f"    initial instrument rate ({instrument})"
+                + " "
+                * (
+                    53
+                    - len("[" + ", ".join(f"{i:1.7f}" for i in instrument_init) + "]")
+                )
+                + "["
+                + ", ".join(f"{i:1.7f}" for i in instrument_init)
+                + "]\n"
+                f"    current instrument rate ({instrument})"
+                + " "
+                * (53 - len("[" + ", ".join(f"{i:1.7f}" for i in instrument_now) + "]"))
+                + "["
+                + ", ".join(f"{i:1.7f}" for i in instrument_now)
+                + "]\n"
+                "################################################"
+                "##############################################\n"
             )
-            print(summary_solve)
 
-        error = abs(average_pv_cost_computed)
-
-        # prepare next outer iteration of solution algorithm
-        if error <= tolerance_solve or n_iter == n_iter_solve_max:
+        # check government budget constraint
+        if (
+            all(
+                [
+                    np.all(abs(pv_ss_net) <= tolerance_solve),
+                    np.all(abs(pv_ui_net) <= tolerance_solve),
+                    np.all(abs(pv_lumpsum_net) <= tolerance_solve),
+                ]
+            )
+            or n_iter == n_iter_solve_max
+        ):
             break  # don't update tax rate in output iteration
-        else:
+        else:  # and prepare next outer iteration of solution algorithm
+
             # update iteration counter
             n_iter += 1
 
-            # update income tax rate
+            # compute adjustment factor
             adjustment_factor = 0.0079 * n_iter ** (-0.25)
 
-            if instrument == "income_tax_rate":
-                income_tax_rate += adjustment_factor * average_pv_cost_computed
-                income_tax_rate_vector = np.repeat(
-                    income_tax_rate, n_periods_working
-                ).reshape((n_types, n_periods_working))
-            elif instrument == "income_tax_shift":
-                income_tax_shift += adjustment_factor * average_pv_cost_computed
-                income_tax_rate_vector = income_tax_rate_init + income_tax_shift
-            elif instrument == "consumption_tax_rate":
-                consumption_tax_rate += adjustment_factor * average_pv_cost_computed
+            # update instrument rate to balance UI budget
+            if instrument == "tax_ui_rate":
+                tax_ui -= adjustment_factor * pv_ui_net
+                tax_ui_vector = np.repeat(tax_ui, n_periods_working).reshape(
+                    (n_types, n_periods_working)
+                )
+            elif instrument == "tax_ui_shift":
+                tax_ui_shift -= adjustment_factor * pv_ui_net
+                tax_ui_vector = tax_ui_vector + tax_ui_shift
+            elif instrument == "tax_consumption":
+                tax_consumption += adjustment_factor * pv_ui_net
+
+            # update transfers and pensions to balance budget of other gov't programs
+            adjustment_weight = 1 / (n_iter + 1)
+            transfers_pensions = (
+                adjustment_weight * transfers_pensions
+                + (1 - adjustment_weight)
+                * average_pv_revenue_ss_computed
+                / pv_cost_factor_ss
+            )
+            transfers_lumpsum = (
+                adjustment_weight * transfers_lumpsum
+                + (1 - adjustment_weight)
+                * average_pv_revenue_lumpsum_computed
+                / pv_cost_factor_lumpsum
+            )
 
     if show_progress:
         print("end solution")
@@ -2594,12 +4161,39 @@ def _solve_and_simulate(controls, calibration):
         # (c) initiate objects for statistics
         # aggregate statistics
         discount_factor_compounded = 1
-        pv_government_income = np.zeros(n_types)
-        pv_government_cost = np.zeros(n_types)
-        total_benefits = np.zeros(n_types)
+        pv_revenue_ss_simulated = np.zeros(n_types)
+        pv_revenue_ui_simulated = np.zeros(n_types)
+        pv_revenue_lumpsum_simulated = np.zeros(n_types)
+        pv_revenue_consumption_simulated = np.zeros(n_types)
+
+        pv_cost_ss_simulated = np.zeros(n_types)
+        pv_cost_ui_simulated = np.zeros(n_types)
+        pv_cost_lumpsum_simulated = np.zeros(n_types)
+        pv_cost_consumption_simulated = np.zeros(n_types)
+
+        pv_revenue_total_simulated = np.zeros(n_types)
+        pv_cost_total_simulated = np.zeros(n_types)
 
         # government budget statistics
-        net_government_spending_working = np.full((n_types, n_periods_working), np.nan)
+        average_cost_ss_simulated = np.full((n_types, n_periods_working), np.nan)
+        average_cost_ui_simulated = np.full((n_types, n_periods_working), np.nan)
+        average_cost_lumpsum_simulated = np.full((n_types, n_periods_working), np.nan)
+        average_cost_consumption_simulated = np.full(
+            (n_types, n_periods_working), np.nan
+        )
+        average_cost_total_simulated = np.full((n_types, n_periods_working), np.nan)
+
+        average_revenue_ss_simulated = np.full((n_types, n_periods_working), np.nan)
+        average_revenue_ui_simulated = np.full((n_types, n_periods_working), np.nan)
+        average_revenue_lumpsum_simulated = np.full(
+            (n_types, n_periods_working), np.nan
+        )
+        average_revenue_consumption_simulated = np.full(
+            (n_types, n_periods_working), np.nan
+        )
+        average_revenue_total_simulated = np.full((n_types, n_periods_working), np.nan)
+
+        average_balance_total_simulated = np.full((n_types, n_periods_working), np.nan)
 
         # hc statistics
         hc_mean = np.full((n_types, n_periods_working), np.nan)
@@ -2634,6 +4228,7 @@ def _solve_and_simulate(controls, calibration):
         assets_distribution = np.full(
             (n_types, assets_grid_size, n_periods_working), np.nan
         )
+        assets_over_income_mean = np.full((n_types, n_periods_working), np.nan)
         log_assets_over_income_nonemployed_mean = np.full(
             (n_types, n_periods_working), np.nan
         )
@@ -2656,15 +4251,16 @@ def _solve_and_simulate(controls, calibration):
         # consumption_nonemployed_stats = np.full((n_types, 4, n_periods_working), np.nan)
         log_consumption_employed_mean = np.full((n_types, n_periods_working), np.nan)
         log_consumption_nonemployed_mean = np.full((n_types, n_periods_working), np.nan)
+        pv_consumption_simulated = np.zeros((n_types, n_simulations))
 
         # labor markets statistics
-        job_finding_probability_unemployed_mean = np.full(
+        job_finding_probability_searching_mean = np.full(
             (n_types, n_periods_working), np.nan
         )
-        job_finding_probability_unemployed_loss_mean = np.full(
+        job_finding_probability_searching_loss_mean = np.full(
             (n_types, n_periods_working), np.nan
         )
-        job_finding_probability_nonemployed_mean = np.full(
+        job_finding_probability_searching_all_mean = np.full(
             (n_types, n_periods_working), np.nan
         )
         job_finding_rate_searching_mean = np.full((n_types, n_periods_working), np.nan)
@@ -2700,28 +4296,14 @@ def _solve_and_simulate(controls, calibration):
             # (i) search phase
 
             # simulate search effort
-            # effort_searching_simulated = interpolate_n_e_a_ordered_to_unordered(
-            #     hc_grid_reduced_n_e_a,
-            #     assets_grid_n_e_a,
-            #     policy_effort_searching[:, :, :, period_idx],
-            #     hc_simulated,
-            #     assets_simulated,
-            # )
-            # effort_searching_loss_simulated = interpolate_n_e_a_ordered_to_unordered(
-            #     hc_grid_reduced_n_e_a,
-            #     assets_grid_n_e_a,
-            #     policy_effort_searching_loss[:, :, :, period_idx],
-            #     hc_simulated,
-            #     assets_simulated,
-            # )
             effort_searching_simulated = np.full((n_types, n_simulations), np.nan)
             effort_searching_loss_simulated = np.full((n_types, n_simulations), np.nan)
             for type_idx in range(n_types):
                 effort_searching_simulated[
                     type_idx, :
                 ] = interpolate_2d_ordered_to_unordered(
-                    hc_grid_reduced_e_a,
-                    assets_grid_e_a,
+                    hc_grid_reduced_h_a,
+                    assets_grid_h_a,
                     policy_effort_searching[type_idx, :, :, period_idx],
                     hc_simulated[type_idx, :],
                     assets_simulated[type_idx, :],
@@ -2729,8 +4311,8 @@ def _solve_and_simulate(controls, calibration):
                 effort_searching_loss_simulated[
                     type_idx, :
                 ] = interpolate_2d_ordered_to_unordered(
-                    hc_grid_reduced_e_a,
-                    assets_grid_e_a,
+                    hc_grid_reduced_h_a,
+                    assets_grid_h_a,
                     policy_effort_searching_loss[type_idx, :, :, period_idx],
                     hc_simulated[type_idx, :],
                     assets_simulated[type_idx, :],
@@ -2752,7 +4334,9 @@ def _solve_and_simulate(controls, calibration):
 
             # compute search phase statistics
             share_searching[:, period_idx] = np.mean(searching_all_simulated, axis=1)
-            job_finding_probability_nonemployed_mean[:, period_idx] = conditional_mean(
+            job_finding_probability_searching_all_mean[
+                :, period_idx
+            ] = conditional_mean(
                 (
                     job_finding_probability_searching_simulated * searching_simulated
                     + job_finding_probability_searching_loss_simulated
@@ -2761,10 +4345,10 @@ def _solve_and_simulate(controls, calibration):
                 searching_all_simulated,
                 axis=1,
             )
-            job_finding_probability_unemployed_mean[:, period_idx] = conditional_mean(
+            job_finding_probability_searching_mean[:, period_idx] = conditional_mean(
                 job_finding_probability_searching_simulated, searching_simulated, axis=1
             )
-            job_finding_probability_unemployed_loss_mean[
+            job_finding_probability_searching_loss_mean[
                 :, period_idx
             ] = conditional_mean(
                 job_finding_probability_searching_loss_simulated,
@@ -2966,7 +4550,10 @@ def _solve_and_simulate(controls, calibration):
                 consumption_simulated,
                 assets_simulated,
                 wage_hc_factor_simulated,
-                income_tax_rate_vector,
+                tax_ss,
+                tax_ui_vector,
+                tax_income,
+                transfers_lumpsum,
                 ui_replacement_rate_vector,
                 ui_floor,
                 ui_cap,
@@ -2975,22 +4562,42 @@ def _solve_and_simulate(controls, calibration):
 
             # compute consumption phase statistics
 
+            # update pv of simulated consumption
+            pv_consumption_simulated += (
+                1 / (1 + interest_rate_raw) ** period_idx
+            ) * consumption_simulated
+
             # update aggregate variables
-            income_tax_revenue_simulated = (
-                np.repeat(income_tax_rate_vector[:, period_idx], n_simulations).reshape(
+            revenue_ss_simulated = (
+                np.repeat(tax_ss, n_simulations).reshape((n_types, n_simulations))
+                * wage_level
+                * wage_hc_factor_simulated
+                * employed_simulated
+            )
+            revenue_ui_simulated = (
+                np.repeat(tax_ui_vector[:, period_idx], n_simulations).reshape(
                     (n_types, n_simulations)
                 )
                 * wage_level
                 * wage_hc_factor_simulated
                 * employed_simulated
             )
-            consumption_tax_revenue_simulated = (
-                np.repeat(consumption_tax_rate, n_simulations).reshape(
+            revenue_lumpsum_simulated = (
+                np.repeat(tax_income, n_simulations).reshape((n_types, n_simulations))
+                * wage_level
+                * wage_hc_factor_simulated
+                * employed_simulated
+                + np.repeat(tax_income, n_simulations).reshape((n_types, n_simulations))
+                * interest_rate_raw
+                * assets_simulated
+            )
+            revenue_consumption_simulated = (
+                np.repeat(tax_consumption, n_simulations).reshape(
                     n_types, n_simulations
                 )
                 * consumption_simulated
             )
-            ui_benefits_simulated = (
+            cost_ui_simulated = (
                 simulate_ui_benefits(
                     wage_level * wage_hc_factor_pre_displacement_simulated,
                     ui_replacement_rate_vector,
@@ -3000,20 +4607,49 @@ def _solve_and_simulate(controls, calibration):
                 )
                 * nonemployed_simulated
             )
+            cost_lumpsum_simulated = np.repeat(
+                transfers_lumpsum, n_simulations
+            ).reshape((n_types, n_simulations))
 
-            pv_government_income += discount_factor_compounded * np.sum(
-                income_tax_revenue_simulated, axis=1
-            ) + discount_factor_compounded * np.sum(
-                consumption_tax_revenue_simulated, axis=1
+            average_revenue_ss_simulated[:, period_idx] = (
+                np.sum(revenue_ss_simulated, axis=1) / n_simulations
             )
-            pv_government_cost += discount_factor_compounded * np.sum(
-                ui_benefits_simulated, axis=1
+            average_revenue_ui_simulated[:, period_idx] = (
+                np.sum(revenue_ui_simulated, axis=1) / n_simulations
             )
-            total_benefits += np.sum(ui_benefits_simulated, axis=1)
-            net_government_spending_working[:, period_idx] = (
-                np.sum(income_tax_revenue_simulated, axis=1)
-                + np.sum(consumption_tax_revenue_simulated, axis=1)
-                - np.sum(ui_benefits_simulated, axis=1)
+            average_revenue_lumpsum_simulated[:, period_idx] = (
+                np.sum(revenue_lumpsum_simulated, axis=1) / n_simulations
+            )
+            average_revenue_consumption_simulated[:, period_idx] = (
+                np.sum(revenue_consumption_simulated, axis=1) / n_simulations
+            )
+            average_cost_ss_simulated[:, period_idx] = np.zeros(n_types) / n_simulations
+            average_cost_ui_simulated[:, period_idx] = (
+                np.sum(cost_ui_simulated, axis=1) / n_simulations
+            )
+            average_cost_lumpsum_simulated[:, period_idx] = (
+                np.sum(cost_lumpsum_simulated, axis=1) / n_simulations
+            )
+            average_cost_consumption_simulated[:, period_idx] = (
+                np.zeros(n_types) / n_simulations
+            )
+            average_cost_total_simulated[:, period_idx] = (
+                np.zeros(n_types)  # no cost of social security during working age
+                + np.sum(cost_ui_simulated, axis=1)
+                + np.sum(cost_lumpsum_simulated, axis=1)
+                + np.zeros(n_types)  # consumption tax not used to finance anything
+            ) / n_simulations
+
+            average_revenue_total_simulated[:, period_idx] = (
+                np.sum(revenue_ss_simulated, axis=1)
+                + np.sum(revenue_ui_simulated, axis=1)
+                + np.sum(revenue_lumpsum_simulated, axis=1)
+                + np.sum(revenue_consumption_simulated, axis=1)
+            ) / n_simulations
+
+            average_balance_total_simulated[:, period_idx] = (
+                average_revenue_total_simulated[:, period_idx]
+                - average_cost_total_simulated[:, period_idx]
             )
 
             # get statistics
@@ -3045,6 +4681,7 @@ def _solve_and_simulate(controls, calibration):
                 assets_mean[:, period_idx],
                 assets_nonemployed_mean[:, period_idx],
                 assets_distribution[:, :, period_idx],
+                assets_over_income_mean[:, period_idx],
                 distribution_hc_assets_nonemployed[:, :, :, period_idx],
                 log_assets_over_income_nonemployed_mean[:, period_idx],
             ) = _get_statistics_consumption_phase(
@@ -3059,7 +4696,7 @@ def _solve_and_simulate(controls, calibration):
                 duration_since_displacement_simulated,
                 hc_simulated,
                 assets_simulated,
-                income_tax_rate_vector,
+                tax_ui_vector,
                 ui_replacement_rate_vector,
                 ui_floor,
                 ui_cap,
@@ -3225,8 +4862,8 @@ def _solve_and_simulate(controls, calibration):
         for type_idx in range(n_types):
             consumption_employed_retired_simulated[type_idx, :] = (
                 interpolate_2d_ordered_to_unordered(
-                    hc_grid_reduced_e_a,
-                    assets_grid_e_a,
+                    hc_grid_reduced_h_a,
+                    assets_grid_h_a,
                     policy_consumption_employed[type_idx, :, :, period_idx + 1],
                     hc_simulated[type_idx, :],
                     assets_simulated[type_idx, :],
@@ -3236,8 +4873,8 @@ def _solve_and_simulate(controls, calibration):
             )
             consumption_unemployed_retired_simulated[type_idx, :] = (
                 interpolate_2d_ordered_to_unordered(
-                    hc_grid_reduced_e_a,
-                    assets_grid_e_a,
+                    hc_grid_reduced_h_a,
+                    assets_grid_h_a,
                     policy_consumption_unemployed[type_idx, :, :, period_idx + 1],
                     hc_simulated[type_idx, :],
                     assets_simulated[type_idx, :],
@@ -3247,8 +4884,8 @@ def _solve_and_simulate(controls, calibration):
             )
             consumption_unemployed_loss_retired_simulated[type_idx, :] = (
                 interpolate_2d_ordered_to_unordered(
-                    hc_grid_reduced_e_a,
-                    assets_grid_e_a,
+                    hc_grid_reduced_h_a,
+                    assets_grid_h_a,
                     policy_consumption_unemployed_loss[type_idx, :, :, period_idx + 1],
                     hc_simulated[type_idx, :],
                     assets_simulated[type_idx, :],
@@ -3263,92 +4900,297 @@ def _solve_and_simulate(controls, calibration):
             + consumption_unemployed_loss_retired_simulated * unemployed_loss_simulated
         )
 
-        # compute discounted simulated retirement value
-        discount_factor_retirement = (1 - discount_factor ** n_periods_retired) / (
-            1 - discount_factor
-        )
-        value_retired_simulated = discount_factor_retirement * consumption_utility(
-            consumption_retired_simulated
+        # compute discounted simulated quantities for retirement period
+        discount_factor_retirement = (
+            (1 + interest_rate_raw) ** n_periods_retired - 1
+        ) / (interest_rate_raw * (1 + interest_rate_raw) ** (n_periods_retired - 1))
+
+        pv_consumption_simulated += (
+            discount_factor_compounded
+            * discount_factor_retirement
+            * consumption_retired_simulated
         )
 
-        government_income_retired_simulated = (
+        pv_consumption_simulated = np.mean(pv_consumption_simulated, axis=1)
+
+        cost_ss_retired_simulated = discount_factor_retirement * np.repeat(
+            transfers_pensions, n_simulations
+        ).reshape((n_types, n_simulations))
+        cost_lumpsum_retired_simulated = discount_factor_retirement * np.repeat(
+            transfers_lumpsum, n_simulations
+        ).reshape((n_types, n_simulations))
+
+        revenue_consumption_retired_simulated = (
             discount_factor_retirement
-            * np.repeat(consumption_tax_rate, n_simulations).reshape(
+            * np.repeat(tax_consumption, n_simulations).reshape(
                 (n_types, n_simulations)
             )
             * consumption_retired_simulated
         )
+        revenue_lumpsum_retired_simulated = (
+            np.repeat(revenue_factor_lumpsum_retirement, n_simulations).reshape(
+                (n_types, n_simulations)
+            )
+            * assets_simulated
+        )
+
+        value_retired_simulated = discount_factor_retirement * consumption_utility(
+            consumption_retired_simulated
+        )
+
+        # compute PVs of government programs
+
+        # compute PVs of streams from working age
+        for period_idx in range(n_periods_working):
+
+            discount_factor_tmp = 1 / (1 + interest_rate_raw) ** period_idx
+
+            pv_cost_ss_simulated += (
+                discount_factor_tmp * average_cost_ss_simulated[:, period_idx]
+            )
+            pv_cost_ui_simulated += (
+                discount_factor_tmp * average_cost_ui_simulated[:, period_idx]
+            )
+            pv_cost_lumpsum_simulated += (
+                discount_factor_tmp * average_cost_lumpsum_simulated[:, period_idx]
+            )
+            pv_cost_consumption_simulated += (
+                discount_factor_tmp * average_cost_consumption_simulated[:, period_idx]
+            )
+            pv_cost_total_simulated += discount_factor_tmp * (
+                average_cost_ss_simulated[:, period_idx]
+                + average_cost_ui_simulated[:, period_idx]
+                + average_cost_lumpsum_simulated[:, period_idx]
+                + average_cost_consumption_simulated[:, period_idx]
+            )
+
+            pv_revenue_ss_simulated += (
+                discount_factor_tmp * average_revenue_ss_simulated[:, period_idx]
+            )
+            pv_revenue_ui_simulated += (
+                discount_factor_tmp * average_revenue_ui_simulated[:, period_idx]
+            )
+            pv_revenue_lumpsum_simulated += (
+                discount_factor_tmp * average_revenue_lumpsum_simulated[:, period_idx]
+            )
+            pv_revenue_consumption_simulated += (
+                discount_factor_tmp
+                * average_revenue_consumption_simulated[:, period_idx]
+            )
+            pv_revenue_total_simulated += discount_factor_tmp * (
+                average_revenue_ss_simulated[:, period_idx]
+                + average_revenue_ui_simulated[:, period_idx]
+                + average_revenue_lumpsum_simulated[:, period_idx]
+                + average_revenue_consumption_simulated[:, period_idx]
+            )
+
+        total_benefits = np.sum(average_cost_ui_simulated, axis=1)
 
         # add discounted simulated retirement value to
         # simulated expected discounted value at birth
         # and expected discounted government cost
         pv_utility_simulated += discount_factor_compounded * value_retired_simulated
-        pv_government_income += discount_factor_compounded * np.sum(
-            government_income_retired_simulated, axis=1
+
+        pv_cost_ss_simulated += (
+            1
+            / (1 + interest_rate_raw) ** n_periods_working
+            * np.sum(cost_ss_retired_simulated, axis=1)
+            / n_simulations
+        )
+        pv_cost_lumpsum_simulated += (
+            1
+            / (1 + interest_rate_raw) ** n_periods_working
+            * np.sum(cost_lumpsum_retired_simulated, axis=1)
+            / n_simulations
+        )
+        pv_cost_total_simulated += (
+            1
+            / (1 + interest_rate_raw) ** n_periods_working
+            * (
+                np.sum(cost_ss_retired_simulated, axis=1)
+                + np.sum(cost_lumpsum_retired_simulated, axis=1)
+            )
+            / n_simulations
         )
 
-        # average over simulations
+        pv_revenue_lumpsum_simulated += (
+            1
+            / (1 + interest_rate_raw) ** n_periods_working
+            * np.sum(revenue_lumpsum_retired_simulated, axis=1)
+            / n_simulations
+        )
+        pv_revenue_consumption_simulated += (
+            1
+            / (1 + interest_rate_raw) ** n_periods_working
+            * np.sum(revenue_consumption_retired_simulated, axis=1)
+            / n_simulations
+        )
+        pv_revenue_total_simulated += (
+            1
+            / (1 + interest_rate_raw) ** n_periods_working
+            * (
+                np.sum(revenue_lumpsum_retired_simulated, axis=1)
+                + np.sum(revenue_consumption_retired_simulated, axis=1)
+            )
+            / n_simulations
+        )
+
+        # compute average PV of utility over simulations
         pv_utility_simulated = np.mean(pv_utility_simulated, axis=1)
 
+        # compute PVs of balances
+        pv_balance_ss_simulated = pv_revenue_ss_simulated - pv_cost_ss_simulated
+        pv_balance_ui_simulated = pv_revenue_ui_simulated - pv_cost_ui_simulated
+        pv_balance_lumpsum_simulated = (
+            pv_revenue_lumpsum_simulated - pv_cost_lumpsum_simulated
+        )
+        # pv_balance_consumption_simulated = (
+        #     pv_revenue_consumption_simulated - pv_cost_consumption_simulated
+        # )
+        pv_balance_total_simulated = (
+            pv_revenue_total_simulated - pv_cost_total_simulated
+        )
+
+        # average over types
+        average_pv_utility_simulated = np.average(
+            pv_utility_simulated, weights=type_weights
+        ).reshape(
+            1,
+        )
+        average_pv_balance_ss_simulated = np.average(
+            pv_balance_ss_simulated, weights=type_weights
+        ).reshape(
+            1,
+        )
+        average_pv_balance_ui_simulated = np.average(
+            pv_balance_ui_simulated, weights=type_weights
+        ).reshape(
+            1,
+        )
+        average_pv_balance_lumpsum_simulated = np.average(
+            pv_balance_lumpsum_simulated, weights=type_weights
+        ).reshape(
+            1,
+        )
+        # average_pv_balance_consumption_simulated = np.average(
+        #     pv_balance_consumption_simulated, weights=type_weights
+        # ).reshape(1,)
+        average_pv_balance_total_simulated = np.average(
+            pv_balance_total_simulated, weights=type_weights
+        ).reshape(
+            1,
+        )
+
+        average_pv_utility_simulated_corrected = (
+            average_pv_utility_computed + 0 * average_pv_balance_total_simulated
+        )
+
+        # print output
         if show_progress:
             print("end simulation")
         #########################################################
         # (b) compute outcomes and store results
 
         # (i) compute outcomes
-        pv_pensions = (
-            discount_factor_compounded
-            * (1 - discount_factor ** n_periods_retired)
-            / (1 - discount_factor)
-            * pension_benefits
-            * n_simulations
-        )
-        pv_government_spending = pv_government_income - pv_government_cost - pv_pensions
         net_government_spending_all = np.append(
-            net_government_spending_working,
-            np.repeat(-pension_benefits * n_simulations, n_periods_retired).reshape(
+            average_balance_total_simulated,
+            np.repeat(-transfers_pensions * n_simulations, n_periods_retired).reshape(
                 (n_types, n_periods_retired)
             ),
             axis=1,
         )
 
-        # average over types
-        average_pv_utility_simulated = np.average(
-            pv_utility_simulated, weights=type_weights
-        )
-        average_pv_government_spending = np.average(
-            pv_government_spending, weights=type_weights
-        )
+        # find quantities for government budget constraint
+        if equilibrium_condition == "combined":
+            welfare_simulated = average_pv_utility_simulated
+            diff_pv_utility = average_pv_utility_simulated - average_pv_utility_computed
+            balance_ss = average_pv_balance_ss_simulated
+            balance_ui = average_pv_balance_ui_simulated
+            balance_lumpsum = average_pv_balance_lumpsum_simulated
 
-        diff_pv_utility = abs(
-            average_pv_utility_simulated - average_pv_utility_computed
-        )
+        elif equilibrium_condition == "individual":
+            welfare_simulated = pv_utility_simulated
+            diff_pv_utility = pv_utility_simulated - pv_utility_computed
+            balance_ss = pv_balance_ss_simulated
+            balance_ui = pv_balance_ui_simulated
+            balance_lumpsum = pv_balance_lumpsum_simulated
 
-        average_pv_utility_simulated_corrected = -(
-            average_pv_utility_computed - 0 * abs(average_pv_government_spending)
-        )
+        else:
+            raise ValueError(
+                "error in equilibrium condition; choose one of "
+                "['combined', 'individual']"
+            )
 
         if show_summary:
-            summary_simulate = np.array(
-                (
-                    ("number of simulations", n_simulations),
-                    ("value at entry (mean simulated)", average_pv_utility_simulated),
-                    ("difference in value at entry", diff_pv_utility),
-                    (
-                        "net gov't budget (simulated)",
-                        np.round(average_pv_government_spending, 3),
-                    ),
+            print(
+                "\n###############################################"
+                "###############################################\n"
+                "MODEL SIMULATION: \n"
+                "    number of simulations"
+                + " " * (69 - len(f"{n_simulations}"))
+                + f"{n_simulations}\n"
+                "    value at entry (mean simulated)"
+                + " "
+                * (
+                    59
+                    - len("[" + ", ".join(f"{i:1.5f}" for i in welfare_simulated) + "]")
                 )
+                + "["
+                + ", ".join(f"{i:1.5f}" for i in welfare_simulated)
+                + "]\n"
+                "    difference in value at entry"
+                + " "
+                * (
+                    62
+                    - len("[" + ", ".join(f"{i:1.5f}" for i in diff_pv_utility) + "]")
+                )
+                + "["
+                + ", ".join(f"{i:1.5f}" for i in diff_pv_utility)
+                + "]\n"
+                "    balance social security (pv)"
+                + " "
+                * (62 - len("[" + ", ".join(f"{i:1.2f}" for i in balance_ss) + "]"))
+                + "["
+                + ", ".join(f"{i:1.2f}" for i in balance_ss)
+                + "]\n"
+                "    balance unemployment insurance (pv)"
+                + " "
+                * (55 - len("[" + ", ".join(f"{i:1.2f}" for i in balance_ui) + "]"))
+                + "["
+                + ", ".join(f"{i:1.2f}" for i in balance_ui)
+                + "]\n"
+                "    balance general tax and transfers (pv)"
+                + " "
+                * (
+                    52
+                    - len("[" + ", ".join(f"{i:1.2f}" for i in balance_lumpsum) + "]")
+                )
+                + "["
+                + ", ".join(f"{i:1.2f}" for i in balance_lumpsum)
+                + "]\n"
+                "################################################"
+                "##############################################\n"
             )
-            print(summary_simulate)
 
         # (ii) store some results
+        average_pv_cost_computed = average_pv_balance_ui_computed.item()
+        average_pv_balance_total_simulated = average_pv_balance_total_simulated.item()
+        average_pv_utility_computed = average_pv_utility_computed.item()
+        average_pv_utility_computed_corrected = (
+            average_pv_utility_computed_corrected.item()
+        )
+        average_pv_utility_simulated = average_pv_utility_simulated.item()
+        average_pv_utility_simulated_corrected = (
+            average_pv_utility_simulated_corrected.item()
+        )
+
         out = {
             "assets_mean": assets_mean,
             "assets_distribution": assets_distribution,
             "assets_nonemployed_mean": assets_nonemployed_mean,
+            "assets_over_income_mean": assets_over_income_mean,
             "average_pv_cost_computed": average_pv_cost_computed,
-            "average_pv_government_spending": average_pv_government_spending,
+            "average_pv_balance_total_simulated": average_pv_balance_total_simulated,
             "average_pv_utility_computed": average_pv_utility_computed,
             "average_pv_utility_computed_corrected": average_pv_utility_computed_corrected,
             "average_pv_utility_simulated": average_pv_utility_simulated,
@@ -3358,25 +5200,45 @@ def _solve_and_simulate(controls, calibration):
             "distribution_assets_hc_nonemployed": distribution_hc_assets_nonemployed,
             "duration_unemployed_weeks_mean": duration_unemployed_weeks_mean,
             "equilibrium_instrument_rate": instrument_hist[-1],
+            "equilibrium_transfers_lumpsum": transfers_lumpsum,
+            "equilibrium_transfers_pensions": transfers_pensions,
             "hc_mean": hc_mean,
             "hc_employed_mean": hc_employed_mean,
             "hc_nonemployed_mean": hc_nonemployed_mean,
             "wage_hc_factor_displaced_mean": wage_hc_factor_displaced_mean,
             "wage_hc_factor_nondisplaced_mean": wage_hc_factor_nondisplaced_mean,
+            "job_finding_probability_searching_mean": job_finding_probability_searching_mean,  # noqa:B950
+            "job_finding_probability_searching_all_mean": job_finding_probability_searching_all_mean,  # noqa:B950
+            "job_finding_probability_searching_loss_mean": job_finding_probability_searching_loss_mean,  # noqa:B950
             "job_finding_rate_searching_mean": job_finding_rate_searching_mean,
             "job_finding_rate_searching_all_mean": job_finding_rate_searching_all_mean,
             "job_finding_rate_searching_loss_mean": job_finding_rate_searching_loss_mean,
             "log_consumption_employed_mean": log_consumption_employed_mean,
             "log_consumption_nonemployed_mean": log_consumption_nonemployed_mean,
             "marginal_utility_nonemployed_mean": marginal_utility_nonemployed_mean,
-            "net_government_spending_working": net_government_spending_working,
+            "average_balance_total_simulated": average_balance_total_simulated,
             "net_government_spending_all": net_government_spending_all,
             "policy_consumption_employed": policy_consumption_employed,
             "policy_consumption_unemployed": policy_consumption_unemployed,
             "policy_consumption_unemployed_loss": policy_consumption_unemployed_loss,
             "policy_effort_searching": policy_effort_searching,
             "policy_effort_searching_loss": policy_effort_searching_loss,
-            "pv_government_spending": pv_government_spending,
+            "pv_balance_total_simulated": pv_balance_total_simulated,
+            "pv_consumption_simulated": pv_consumption_simulated,
+            "pv_cost_ss_computed": pv_cost_ss_computed,
+            "pv_cost_ui_computed": pv_cost_ui_computed,
+            "pv_cost_lumpsum_computed": pv_cost_lumpsum_computed,
+            "pv_cost_ss_simulated": pv_cost_ss_simulated,
+            "pv_cost_ui_simulated": pv_cost_ui_simulated,
+            "pv_cost_lumpsum_simulated": pv_cost_lumpsum_simulated,
+            "pv_cost_consumption_simulated": pv_cost_consumption_simulated,
+            "pv_revenue_ss_computed": pv_revenue_ss_computed,
+            "pv_revenue_ui_computed": pv_revenue_ui_computed,
+            "pv_revenue_lumpsum_computed": pv_revenue_lumpsum_computed,
+            "pv_revenue_ss_simulated": pv_revenue_ss_simulated,
+            "pv_revenue_ui_simulated": pv_revenue_ui_simulated,
+            "pv_revenue_lumpsum_simulated": pv_revenue_lumpsum_simulated,
+            "pv_revenue_consumption_simulated": pv_revenue_consumption_simulated,
             "share_employed": share_employed,
             "share_nonemployed": share_nonemployed,
             "share_searching": share_searching,
@@ -3394,18 +5256,19 @@ def _solve_and_simulate(controls, calibration):
             "welfare": pv_utility_corrected,
         }
 
-        for item in out:
-            try:
-                out[item] = out[item].tolist()
-            except AttributeError:
-                pass
-
     else:
+        average_pv_cost_computed = average_pv_cost_ui_computed.item()
+        average_pv_utility_computed = average_pv_utility_computed.item()
+        average_pv_utility_computed_corrected = (
+            average_pv_utility_computed_corrected.item()
+        )
         out = {
             "average_pv_cost_computed": average_pv_cost_computed,
             "average_pv_utility_computed": average_pv_utility_computed,
             "average_pv_utility_computed_corrected": average_pv_utility_computed_corrected,
             "equilibrium_instrument_rate": instrument_hist[-1],
+            "equilibrium_transfers_lumpsum": transfers_lumpsum,
+            "equilibrium_transfers_pensions": transfers_pensions,
             "policy_consumption_employed": policy_consumption_employed,
             "policy_consumption_unemployed": policy_consumption_unemployed,
             "policy_consumption_unemployed_loss": policy_consumption_unemployed_loss,
@@ -3414,9 +5277,14 @@ def _solve_and_simulate(controls, calibration):
             "welfare": pv_utility_corrected,
         }
 
+    for item in out:
+        try:
+            out[item] = out[item].tolist()
+        except AttributeError:
+            pass
+
     if show_progress:
         print("end main")
-
     return out
 
 
@@ -3430,7 +5298,7 @@ if __name__ == "__main__":
         setup_name = sys.argv[1]
         method = sys.argv[2]
     except IndexError:
-        setup_name = "edu_high_flat_no_caps"
+        setup_name = "base_combined_recalibrated_no_inctax"
         method = "linear"
 
     # load calibration and set some variables
@@ -3442,12 +5310,12 @@ if __name__ == "__main__":
     controls = {
         "interpolation_method": method,
         "n_iterations_solve_max": 20,
-        "n_simulations": int(1e4),
+        "n_simulations": int(1e5),
         "run_simulation": True,
         "seed_simulation": 3405,
         "show_progress_solve": True,
         "show_summary": True,
-        "tolerance_solve": 1e-7,
+        "tolerance_solve": 1e-5,
     }
 
     # solve and simulate

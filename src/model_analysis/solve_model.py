@@ -6,9 +6,9 @@ import warnings
 import numba as nb
 import numpy as np
 import numpy_financial as npf
-from bld.project_paths import project_paths_join as ppj
 from scipy import interpolate
 
+from bld.project_paths import project_paths_join as ppj
 from src.utilities.interpolation_utils import interpolate_1d
 from src.utilities.interpolation_utils import interpolate_2d_ordered_to_unordered
 from src.utilities.interpolation_utils import interpolate_2d_unordered_to_unordered_iter

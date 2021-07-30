@@ -38,7 +38,10 @@
   "consumption_min": 1e-06,
   "contact_rate": 1.0,
   "discount_factor": 0.99,
-  "equilibrium_condition": "combined",
+  "equilibrium_condition": "fixed_budget",
+  "budget_income_target": [0.0, 0.0, 0.0],
+  "budget_ui_target": [0.0, 0.0, 0.0],
+  "budget_ss_target": [0.0, 0.0, 0.0],
   "hc_grid_reduced": [
     0,
     2,

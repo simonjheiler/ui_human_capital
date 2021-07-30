@@ -3104,13 +3104,13 @@ def _solve_and_simulate(controls, calibration):
     n_periods_retired = calibration["n_periods_retired"]
     n_periods_working = calibration["n_periods_working"]
     n_types = calibration["n_types"]
-    transfers_pensions = np.array(calibration["transfers_pensions_init"])
-    transfers_lumpsum = np.array(calibration["transfers_lumpsum_init"])
     risk_aversion_coefficient = calibration["risk_aversion_coefficient"]
     search_effort_grid_size = calibration["search_effort_grid_size"]
     search_effort_max = calibration["search_effort_max"]
     search_effort_min = calibration["search_effort_min"]
     separation_rate_vector = np.array(calibration["separation_rate_vector"])
+    transfers_pensions = np.array(calibration["transfers_pensions_init"])
+    transfers_lumpsum = np.array(calibration["transfers_lumpsum_init"])
     type_weights = np.array(calibration["type_weights"])
     ui_cap = calibration["ui_cap"]
     ui_floor = calibration["ui_floor"]
@@ -3200,6 +3200,12 @@ def _solve_and_simulate(controls, calibration):
             "error in equilibrium instrument; choose one of "
             "['tax_ui_rate', 'tax_ui_shift', 'tax_consumption']"
         )
+
+    # load targets for fixed budget calibration
+    if equilibrium_condition == "fixed_budget":
+        pv_balance_lumpsum_target = np.array(calibration["pv_balance_lumpsum_target"])
+        pv_balance_ui_target = np.array(calibration["pv_balance_ui_target"])
+        pv_balance_ss_target = np.array(calibration["pv_balance_ss_target"])
 
     # set initial values for policy rates
     tax_consumption = tax_consumption_init
@@ -3977,9 +3983,11 @@ def _solve_and_simulate(controls, calibration):
 
         # find quantities for government budget constraint
         if equilibrium_condition == "combined":
-            pv_ss_net = average_pv_balance_ss_computed
-            pv_ui_net = average_pv_balance_ui_computed
             pv_lumpsum_net = average_pv_balance_lumpsum_computed
+            pv_ui_net = average_pv_balance_ui_computed
+            pv_ss_net = average_pv_balance_ss_computed
+            pv_revenue_lumpsum = average_pv_revenue_lumpsum_computed
+            pv_revenue_ss = average_pv_revenue_ss_computed
             utility_at_entry = average_pv_utility_computed
             utility_at_entry_corrected = average_pv_utility_computed_corrected
             instrument_init = (
@@ -3992,10 +4000,12 @@ def _solve_and_simulate(controls, calibration):
             ).reshape(
                 1,
             )
-        elif equilibrium_condition == "individual":
-            pv_ss_net = pv_balance_ss_computed
-            pv_ui_net = pv_balance_ui_computed
-            pv_lumpsum_net = pv_balance_lumpsum_computed
+        elif equilibrium_condition == "fixed_budget":
+            pv_lumpsum_net = pv_balance_lumpsum_computed - pv_balance_lumpsum_target
+            pv_ss_net = pv_balance_ss_computed - pv_balance_ss_target
+            pv_ui_net = pv_balance_ui_computed - pv_balance_ui_target
+            pv_revenue_lumpsum = pv_revenue_lumpsum_computed - pv_balance_lumpsum_target
+            pv_revenue_ss = pv_revenue_ss_computed - pv_balance_ss_target
             utility_at_entry = pv_utility_computed
             utility_at_entry_corrected = pv_utility_corrected
             instrument_init = instrument_hist[0]
@@ -4003,7 +4013,7 @@ def _solve_and_simulate(controls, calibration):
         else:
             raise ValueError(
                 "error in equilibrium condition; choose one of "
-                "['combined', 'individual']"
+                "['combined', 'fixed_budget']"
             )
 
         # print output summary
@@ -4026,7 +4036,7 @@ def _solve_and_simulate(controls, calibration):
                 + " "
                 * (62 - len("[" + ", ".join(f"{i:1.7f}" for i in pv_ss_net) + "]"))
                 + "["
-                + ", ".join("{i:1.7f}" for i in pv_ss_net)
+                + ", ".join(f"{i:1.7f}" for i in pv_ss_net)
                 + "]\n"
                 "    balance general tax and transfers (pv)"
                 + " "
@@ -4112,13 +4122,13 @@ def _solve_and_simulate(controls, calibration):
             transfers_pensions = (
                 adjustment_weight * transfers_pensions
                 + (1 - adjustment_weight)
-                * average_pv_revenue_ss_computed
+                * pv_revenue_ss
                 / pv_cost_factor_ss
             )
             transfers_lumpsum = (
                 adjustment_weight * transfers_lumpsum
                 + (1 - adjustment_weight)
-                * average_pv_revenue_lumpsum_computed
+                * pv_revenue_lumpsum
                 / pv_cost_factor_lumpsum
             )
 
@@ -5108,7 +5118,7 @@ def _solve_and_simulate(controls, calibration):
             balance_ui = average_pv_balance_ui_simulated
             balance_lumpsum = average_pv_balance_lumpsum_simulated
 
-        elif equilibrium_condition == "individual":
+        elif equilibrium_condition == "fixed_budget":
             welfare_simulated = pv_utility_simulated
             diff_pv_utility = pv_utility_simulated - pv_utility_computed
             balance_ss = pv_balance_ss_simulated
@@ -5118,7 +5128,7 @@ def _solve_and_simulate(controls, calibration):
         else:
             raise ValueError(
                 "error in equilibrium condition; choose one of "
-                "['combined', 'individual']"
+                "['combined', 'fixed_budget']"
             )
 
         if show_summary:
@@ -5298,7 +5308,7 @@ if __name__ == "__main__":
         setup_name = sys.argv[1]
         method = sys.argv[2]
     except IndexError:
-        setup_name = "base_combined_recalibrated_no_inctax"
+        setup_name = "opt_rate_both_fixed_budget"
         method = "linear"
 
     # load calibration and set some variables

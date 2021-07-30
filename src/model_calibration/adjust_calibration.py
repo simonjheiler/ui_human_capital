@@ -984,7 +984,7 @@ if __name__ == "__main__":
         open(
             ppj(
                 "IN_MODEL_SPECS",
-                "analytics_calibration_base_combined_recalibrated_no_inctax.json",
+                "analytics_calibration_base_combined.json",
             )
         )
     )

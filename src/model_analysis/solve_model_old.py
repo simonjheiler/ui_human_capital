@@ -5298,7 +5298,7 @@ if __name__ == "__main__":
         setup_name = sys.argv[1]
         method = sys.argv[2]
     except IndexError:
-        setup_name = "base_combined_recalibrated_no_inctax"
+        setup_name = "base_combined"
         method = "linear"
 
     # load calibration and set some variables

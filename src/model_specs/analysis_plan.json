@@ -1,34 +1,34 @@
 {
   "calibration": [
-    "base_combined_recalibrated_no_inctax",
-    "opt_rate_age_combined_recalibrated_no_inctax",
-    "opt_rate_both_combined_recalibrated_no_inctax",
-    "opt_rate_floor_cap_combined_recalibrated_no_inctax"
+    "base_combined",
+    "opt_rate_age_combined",
+    "opt_rate_both_combined",
+    "opt_rate_floor_cap_combined"
   ],
   "linear": {
     "results": [
-      "base_combined_recalibrated_no_inctax",
-      "opt_rate_age_combined_recalibrated_no_inctax",
-      "opt_rate_both_combined_recalibrated_no_inctax",
-      "opt_rate_floor_cap_combined_recalibrated_no_inctax"
+      "base_combined",
+      "opt_rate_age_combined",
+      "opt_rate_both_combined",
+      "opt_rate_floor_cap_combined"
     ],
     "elasticity_approx": [],
     "elasticity_exact": [],
     "first_best": [
-      "base_combined_recalibrated_no_inctax"
+      "base_combined"
     ],
     "first_best_3_agents": [],
     "optimization": [],
     "welfare": [
       {
-        "equilibrium_condition": "combined_recalibrated_no_inctax",
-        "baseline": "base_combined_recalibrated_no_inctax",
+        "equilibrium_condition": "combined",
+        "baseline": "base_combined",
         "results": {
-          "First best": "base_combined_recalibrated_no_inctax_first_best",
-          "Age and type dependent": "opt_rate_both_combined_recalibrated_no_inctax_results",
-          "Age dependent": "opt_rate_age_combined_recalibrated_no_inctax_results",
-          "Constant rate, floor and cap": "opt_rate_floor_cap_combined_recalibrated_no_inctax_results",
-          "Baseline": "base_combined_recalibrated_no_inctax_results"
+          "First best": "base_combined_first_best",
+          "Age and type dependent": "opt_rate_both_combined_results",
+          "Age dependent": "opt_rate_age_combined_results",
+          "Constant rate, floor and cap": "opt_rate_floor_cap_combined_results",
+          "Baseline": "base_combined_results"
         }
       }
     ]

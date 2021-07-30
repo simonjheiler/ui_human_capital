@@ -4121,15 +4121,11 @@ def _solve_and_simulate(controls, calibration):
             adjustment_weight = 1 / (n_iter + 1)
             transfers_pensions = (
                 adjustment_weight * transfers_pensions
-                + (1 - adjustment_weight)
-                * pv_revenue_ss
-                / pv_cost_factor_ss
+                + (1 - adjustment_weight) * pv_revenue_ss / pv_cost_factor_ss
             )
             transfers_lumpsum = (
                 adjustment_weight * transfers_lumpsum
-                + (1 - adjustment_weight)
-                * pv_revenue_lumpsum
-                / pv_cost_factor_lumpsum
+                + (1 - adjustment_weight) * pv_revenue_lumpsum / pv_cost_factor_lumpsum
             )
 
     if show_progress:
@@ -5308,7 +5304,7 @@ if __name__ == "__main__":
         setup_name = sys.argv[1]
         method = sys.argv[2]
     except IndexError:
-        setup_name = "opt_rate_both_fixed_budget"
+        setup_name = "opt_rate_both_combined"
         method = "linear"
 
     # load calibration and set some variables

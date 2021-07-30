@@ -6,8 +6,6 @@ Find optimal life cycle profiles of UI benefit replacement rates and tax rates.
 #####################################################
 import copy
 import json
-# import src.utilities.istarmap_3_7  # noqa, noreorder
-
 import src.utilities.istarmap_3_8  # noqa, noreorder
 import multiprocessing
 import sys
@@ -1113,7 +1111,7 @@ if __name__ == "__main__":
         setup_name = sys.argv[1]
         method = sys.argv[2]
     except IndexError:
-        setup_name = "opt_rate_both_fixed_budget"
+        setup_name = "opt_rate_both_combined"
         method = "linear"
 
     # load calibration and set variables

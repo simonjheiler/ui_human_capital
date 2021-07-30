@@ -47,7 +47,7 @@ def _eval_rate(coefficients, controls, calibration):
     :returns:
     objective : float
         Value of objective function at *coefficients*
-    equilibrium_instrument_rate : float
+    equilibrium_quantities : float
         Value of instrument rate that ensures balanced budget at *coefficients*
 
     """
@@ -63,7 +63,7 @@ def _eval_rate(coefficients, controls, calibration):
     # extract outputs
     objective = results["average_pv_utility_computed_corrected"]
     equilibrium_quantities = {
-        "instrument": results["equilibrium_instrument_rate"],
+        "instrument_rate": results["equilibrium_instrument_rate"],
         "transfers_pensions": results["equilibrium_transfers_pensions"],
         "transfers_lumpsum": results["equilibrium_transfers_lumpsum"],
     }
@@ -88,7 +88,7 @@ def _eval_rate_floor_cap(coefficients, controls, calibration):
     :returns:
     objective : float
         Value of objective function at *coefficients*
-    equilibrium_instrument_rate : float
+    equilibrium_quantities : float
         Value of instrument rate that ensures balanced budget at *coefficients*
 
     """
@@ -106,7 +106,7 @@ def _eval_rate_floor_cap(coefficients, controls, calibration):
     # extract outputs
     objective = results["average_pv_utility_computed_corrected"]
     equilibrium_quantities = {
-        "instrument": results["equilibrium_instrument_rate"],
+        "instrument_rate": results["equilibrium_instrument_rate"],
         "transfers_pensions": results["equilibrium_transfers_pensions"],
         "transfers_lumpsum": results["equilibrium_transfers_lumpsum"],
     }
@@ -132,7 +132,7 @@ def _eval_rate_type(coefficients, controls, calibration):
     :returns:
     objective : float
         Value of objective function at *coefficients*
-    equilibrium_instrument_rate : float
+    equilibrium_quantities : float
         Value of instrument rate that ensures balanced budget at *coefficients*
 
     """
@@ -154,7 +154,7 @@ def _eval_rate_type(coefficients, controls, calibration):
     # extract outputs
     objective = results["average_pv_utility_computed_corrected"]
     equilibrium_quantities = {
-        "instrument": results["equilibrium_instrument_rate"],
+        "instrument_rate": results["equilibrium_instrument_rate"],
         "transfers_pensions": results["equilibrium_transfers_pensions"],
         "transfers_lumpsum": results["equilibrium_transfers_lumpsum"],
     }
@@ -180,7 +180,7 @@ def _eval_rate_vector(coefficients, controls, calibration):
     :returns:
     objective : float
         Value of objective function at *coefficients*
-    equilibrium_instrument_rate : float
+    equilibrium_quantities : float
         Value of instrument rate that ensures balanced budget at *coefficients*
 
     """
@@ -210,7 +210,7 @@ def _eval_rate_vector(coefficients, controls, calibration):
     # extract outputs
     objective = results["average_pv_utility_computed_corrected"]
     equilibrium_quantities = {
-        "instrument": results["equilibrium_instrument_rate"],
+        "instrument_rate": results["equilibrium_instrument_rate"],
         "transfers_pensions": results["equilibrium_transfers_pensions"],
         "transfers_lumpsum": results["equilibrium_transfers_lumpsum"],
     }
@@ -236,7 +236,7 @@ def _eval_rate_age_type(coefficients, controls, calibration):
     :returns:
     objective : float
         Value of objective function at *coefficients*
-    equilibrium_instrument_rate : float
+    equilibrium_quantities : float
         Value of instrument rate that ensures balanced budget at *coefficients*
 
     """
@@ -271,7 +271,7 @@ def _eval_rate_age_type(coefficients, controls, calibration):
     # extract outputs
     objective = results["average_pv_utility_computed_corrected"]
     equilibrium_quantities = {
-        "instrument": results["equilibrium_instrument_rate"],
+        "instrument_rate": results["equilibrium_instrument_rate"],
         "transfers_pensions": results["equilibrium_transfers_pensions"],
         "transfers_lumpsum": results["equilibrium_transfers_lumpsum"],
     }
@@ -809,7 +809,7 @@ def qnewton(func, jac, x_ini, controls, *args):
     ValueError : NaNs or INFs in coefficients.
 
     The user defined functions FUNC and JAC must have the following syntax
-        fx, instr_eq = f(x, controls, *args)
+        fx, equilibrium_quantities = f(x, controls, *args)
         g = jac(x, controls, *args)
     where, in either case, the additional variables are the ones passed to QNEWTON
 
@@ -896,20 +896,23 @@ def qnewton(func, jac, x_ini, controls, *args):
         "##############################################\n"
     )
     print("compute initial function value")
-    fx0, instr_eq = func(x_ini, controls, *args)
+    fx0, equilibrium_quantities = func(x_ini, controls, *args)
 
     # update equilibrium instrument rate
-    if instrument == "consumption_tax":
-        calibration["consumption_tax_rate_init"][interpolation_method] = instr_eq[
-            "tax_consumption"
+    if instrument == "tax_consumption_rate":
+        calibration["tax_consumption_init"][
+            interpolation_method
+        ] = equilibrium_quantities["instrument_rate"]
+    elif instrument == "tax_ui_rate":
+        calibration["tax_ui_init"][interpolation_method] = equilibrium_quantities[
+            "instrument_rate"
         ]
-        calibration["transfers_pensions_init"] = instr_eq["transfers_pensions"]
-        calibration["transfers_lumpsum_init"] = instr_eq["transfers_lumpsum"]
-    elif instrument == "income_tax_rate":
-        calibration["income_tax_rate_init"][interpolation_method] = instr_eq["tax_ui"]
-        calibration["transfers_pensions_init"] = instr_eq["transfers_pensions"]
-        calibration["transfers_lumpsum_init"] = instr_eq["transfers_lumpsum"]
+    calibration["transfers_pensions_init"] = equilibrium_quantities[
+        "transfers_pensions"
+    ]
+    calibration["transfers_lumpsum_init"] = equilibrium_quantities["transfers_lumpsum"]
 
+    # compute Jacobian
     print("compute initial Jacobian")
     g0 = jac(x_ini, controls, *args)
     print(
@@ -939,7 +942,7 @@ def qnewton(func, jac, x_ini, controls, *args):
 
     if np.all(abs(g0) < tolerance_convergence_gradient):
         print("Gradient tolerance reached at starting value")
-        return x_ini, fx0, g0, hessian, instr_eq
+        return x_ini, fx0, g0, hessian, equilibrium_quantities
 
     ####################
     # start iteration
@@ -962,7 +965,7 @@ def qnewton(func, jac, x_ini, controls, *args):
             reset = 1
 
         print("compute optimal step length")
-        s, fx, instr_eq, iterations, err = get_step_size(
+        s, fx, equilibrium_quantities, iterations, err = get_step_size(
             func, x, fx0, g0, d, controls, *args
         )
 
@@ -970,16 +973,16 @@ def qnewton(func, jac, x_ini, controls, *args):
         if fx <= fx0:
             if reset:  # if already using steepest ascent, break
                 warnings.warn("Iterations stuck in qnewton")
-                return x, fx0, g0, hessian, instr_eq
+                return x, fx0, g0, hessian, equilibrium_quantities
             else:  # else, try again with steepest ascent
                 hessian = -np.identity(k) / max(abs(fx0), 1)
                 d = g0 / max(abs(fx0), 1)
-                s, fx, instr_eq, iterations, err = get_step_size(
+                s, fx, equilibrium_quantities, iterations, err = get_step_size(
                     func, x, fx0, g0, d, controls, *args
                 )
                 if err:
                     warnings.warn("Cannot find suitable step in qnewton")
-                    return x, fx0, g0, hessian, instr_eq
+                    return x, fx0, g0, hessian, equilibrium_quantities
 
         # run some checks, then update step and current coefficient vector
         if np.logical_or(np.any(np.isnan(x + (s * d))), np.any(np.isinf(x + (s * d)))):
@@ -994,14 +997,20 @@ def qnewton(func, jac, x_ini, controls, *args):
             x = x + d
 
         # update equilibrium instrument rate
-        if instrument == "consumption_tax":
-            calibration["consumption_tax_rate_init"][interpolation_method] = instr_eq
-            calibration["transfers_pensions_init"] = instr_eq["transfers_pensions"]
-            calibration["transfers_lumpsum_init"] = instr_eq["transfers_lumpsum"]
-        elif instrument == "income_tax_rate":
-            calibration["income_tax_rate_init"][interpolation_method] = instr_eq
-            calibration["transfers_pensions_init"] = instr_eq["transfers_pensions"]
-            calibration["transfers_lumpsum_init"] = instr_eq["transfers_lumpsum"]
+        if instrument == "tax_consumption_rate":
+            calibration["tax_consumption_init"][
+                interpolation_method
+            ] = equilibrium_quantities["instrument_rate"]
+        elif instrument == "tax_ui_rate":
+            calibration["tax_ui_init"][interpolation_method] = equilibrium_quantities[
+                "instrument_rate"
+            ]
+        calibration["transfers_pensions_init"] = equilibrium_quantities[
+            "transfers_pensions"
+        ]
+        calibration["transfers_lumpsum_init"] = equilibrium_quantities[
+            "transfers_lumpsum"
+        ]
 
         # compute Jacobian
         print("compute jacobian after step")
@@ -1098,7 +1107,7 @@ def qnewton(func, jac, x_ini, controls, *args):
         "##############################################\n"
     )
 
-    return x, fx, g, hessian, instr_eq
+    return x, fx, g, hessian, equilibrium_quantities
 
 
 #####################################################
@@ -1138,7 +1147,7 @@ if __name__ == "__main__":
         "tolerance_bfgs_update": 1e-9,
         "tolerance_convergence_gradient": 1e-6,
         "tolerance_convergence_marquardt": 1e-4,
-        "tolerance_solve": 1e-3,
+        "tolerance_solve": 1e-4,
         "tolerance_slope_min": 1e-6,
         "zero_factor_convergence_marquardt": 1,
     }
@@ -1262,7 +1271,7 @@ if __name__ == "__main__":
         )
 
     # run optimization
-    x_opt, fx_opt, g_opt, hessian, instr_eq = qnewton(
+    x_opt, fx_opt, g_opt, hessian, equilibrium_quantities = qnewton(
         func, jac, x_ini, controls, calibration
     )
 
@@ -1271,7 +1280,7 @@ if __name__ == "__main__":
         "optimization": method,
         "ui_coefficients_opt": x_opt,
         "welfare_opt": fx_opt,
-        "equilibrium_instrument_rate": instr_eq,
+        "equilibrium_quantities": equilibrium_quantities,
     }
 
     for item in results:

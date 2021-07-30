@@ -5304,7 +5304,7 @@ if __name__ == "__main__":
         setup_name = sys.argv[1]
         method = sys.argv[2]
     except IndexError:
-        setup_name = "opt_rate_both_combined"
+        setup_name = "opt_rate_both_fixed_budget"
         method = "linear"
 
     # load calibration and set some variables

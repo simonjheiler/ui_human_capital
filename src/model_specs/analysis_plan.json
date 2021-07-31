@@ -3,14 +3,16 @@
     "base_combined",
     "opt_rate_age_combined",
     "opt_rate_both_combined",
-    "opt_rate_floor_cap_combined"
+    "opt_rate_floor_cap_combined",
+    "opt_rate_both_fixed_budget"
   ],
   "linear": {
     "results": [
       "base_combined",
       "opt_rate_age_combined",
       "opt_rate_both_combined",
-      "opt_rate_floor_cap_combined"
+      "opt_rate_floor_cap_combined",
+      "opt_rate_both_fixed_budget"
     ],
     "elasticity_approx": [],
     "elasticity_exact": [],

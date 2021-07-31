@@ -26,6 +26,7 @@
         "results": {
           "First best": "base_combined_first_best",
           "Age and type dependent": "opt_rate_both_combined_results",
+          "Age and type dependent (fixed budget)": "opt_rate_both_fixed_budget_results",
           "Age dependent": "opt_rate_age_combined_results",
           "Constant rate, floor and cap": "opt_rate_floor_cap_combined_results",
           "Baseline": "base_combined_results"

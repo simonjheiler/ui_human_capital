@@ -13,9 +13,9 @@ import sys
 import numba as nb
 import numpy as np
 import pandas as pd
-from bld.project_paths import project_paths_join as ppj
 from scipy import interpolate
 
+from bld.project_paths import project_paths_join as ppj
 from src.utilities.interpolation_utils import interpolate_2d_ordered_to_unordered
 
 #####################################################
@@ -1004,7 +1004,7 @@ if __name__ == "__main__":
         equilibrium_condition = sys.argv[2]
     except IndexError:
         method = "linear"
-        equilibrium_condition = "combined_recalibrated_no_inctax"
+        equilibrium_condition = "combined"
 
     analysis_plan = {
         "baseline": "base_" + equilibrium_condition,
@@ -1012,6 +1012,9 @@ if __name__ == "__main__":
             "First best": "base_" + equilibrium_condition + "_first_best",
             "Age and type dependent": "opt_rate_both_"
             + equilibrium_condition
+            + "_results",
+            "Age and type dependent (fixed budget)": "opt_rate_both_"
+            + "fixed_budget"
             + "_results",
             "Age dependent": "opt_rate_age_" + equilibrium_condition + "_results",
             "Constant rate, floor and cap": "opt_rate_floor_cap_"

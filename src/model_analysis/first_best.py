@@ -12,8 +12,9 @@ import warnings
 
 import numba as nb
 import numpy as np
-from bld.project_paths import project_paths_join as ppj
 from scipy import interpolate
+
+from bld.project_paths import project_paths_join as ppj
 
 #####################################################
 # PARAMETERS
@@ -1337,7 +1338,7 @@ if __name__ == "__main__":
         setup_name = sys.argv[1]
         method = sys.argv[2]
     except IndexError:
-        setup_name = "edu_high_opt_rate_only"
+        setup_name = "base_combined"
         method = "linear"
 
     # load calibration and set variables
